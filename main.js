@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = 20;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = 21;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = 0;             // 检测到的 hostscript 实际版本（设置面板展示）
   async function _loadHostJsx() {
     try {
@@ -1515,10 +1515,26 @@
     const items = [];
     for (const e of idx.items) {
       if (!e || !e.id) continue;
+      // ⚠ 切库后分类 id 是重新生成的（c+时间戳），索引里的旧 cat id 必然失配；
+      //   直接落 uncat 会把整个库的素材全变“未分类” → 按文件所在文件夹名反查分类
+      //   （文件夹已在 syncCategoryFolders 阶段同步成面板分类）
+      let catId = "uncat";
       const catOk = state.categories.some((c) => c.id === e.cat);
+      if (catOk) {
+        catId = e.cat;
+      } else if (e.file) {
+        const p = String(e.file).replace(/\\/g, "/");
+        const dir = p.slice(0, p.lastIndexOf("/"));
+        const dirName = dir.slice(dir.lastIndexOf("/") + 1);
+        if (dirName) {
+          const cat = state.categories.find((c) => c.dir && c.dir.toLowerCase() === dirName.toLowerCase()) ||
+                      state.categories.find((c) => c.name && c.name.toLowerCase() === dirName.toLowerCase());
+          if (cat) catId = cat.id;
+        }
+      }
       items.push({
         id: e.id, name: e.name || "未命名",
-        categoryId: catOk ? e.cat : "uncat",
+        categoryId: catId,
         file: e.file, thumb: e.thumb, kind: e.kind || undefined,
         starred: e.star ? 1 : 0,
         order: e.order || e.createdAt || Date.now(),
