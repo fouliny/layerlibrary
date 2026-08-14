@@ -514,6 +514,38 @@ input, textarea {
 .modal-actions { display: flex; gap: 8px; margin-top: 14px; }
 .modal-actions .btn-primary { flex: 1; }
 
+/* 检查更新进度条 */
+.upd-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(128,128,128,0.25);
+  overflow: hidden;
+}
+.upd-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width .3s;
+}
+.upd-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.upd-meta .upd-dir {
+  color: var(--text-faint);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 55%;
+}
+
 /* 设置弹窗底部作者信息 */
 .author-line {
   display: flex; align-items: center; justify-content: center; gap: 6px;

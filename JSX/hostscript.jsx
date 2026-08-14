@@ -20,7 +20,7 @@ var _PSL_INDEX_NAME = ".mu_index.json";
 // 脚本版本号：每次改动 hostscript 后 +1。
 // 面板启动时用它检测 PS 内存里是否还是旧版脚本：ExtendScript 全局在 PS 运行期间
 // 一直保留，旧函数不会自动更新 —— 不重加载新函数就不存在 → 扫描静默失败（只显分类不显素材）
-var PSL_SCRIPT_VERSION = 25;
+var PSL_SCRIPT_VERSION = 26;
 function PSL_Version() {
     return "OK:" + PSL_SCRIPT_VERSION;
 }
@@ -67,6 +67,30 @@ function PSL_ReadUpdateResult() {
         var t = f.read();
         f.close();
         return "OK:" + (t || "").replace(/[\r\n]+$/, "");
+    } catch (e) {
+        return "ERR:" + e.message;
+    }
+}
+
+// 读取更新进度（面板轮询进度条）：OK:NONE / OK:STEP:DOWNLOAD <pct> / OK:STEP:EXTRACT / OK:STEP:INSTALL
+function PSL_ReadUpdateProgress() {
+    try {
+        var f = new File($.getenv("TEMP") + "/MuMuHelper_update/progress.txt");
+        if (!f.exists) return "OK:NONE";
+        f.encoding = "UTF-8";
+        f.open("r");
+        var t = f.read();
+        f.close();
+        return "OK:" + (t || "").replace(/[\r\n]+$/, "");
+    } catch (e) {
+        return "ERR:" + e.message;
+    }
+}
+
+// 更新下载目录（面板在进度条下展示，用户可自行找到安装包）
+function PSL_GetUpdateDir() {
+    try {
+        return "OK:" + new Folder($.getenv("TEMP") + "/MuMuHelper_update").fsName;
     } catch (e) {
         return "ERR:" + e.message;
     }
