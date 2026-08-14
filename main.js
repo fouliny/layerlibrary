@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = 19;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = 20;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = 0;             // 检测到的 hostscript 实际版本（设置面板展示）
   async function _loadHostJsx() {
     try {
@@ -2088,6 +2088,8 @@
   let _syncPending = null;  // 运行中又收到同步请求 → 结束时补跑一次（合并，避免叠加大扫描）
   let _syncSeq = 0;         // 同步序号：递增即可让在途分片循环作废（可中断）
   let _rescueInFlight = false;  // 简单枚举救回是否在进行中（防叠加）
+  let _rebuildRunning = false;  // 全量重建（simpleRebuildAssets）是否进行中：兜底救回需跳过，避免互踩作废
+  let _rebuildFailCats = 0;     // 最近一次全量重建中枚举失败的分类数（>0 时同步收尾要提示）
   let _syncPillEl = null;
   function setSyncPill(text) {
     if (!_syncPillEl) _syncPillEl = document.getElementById("syncPill");
@@ -2181,13 +2183,14 @@
       if (_syncPending) {
         const p = _syncPending; _syncPending = null;
         setTimeout(() => { runBackgroundSync(p); }, 120);  // 合并后补跑一轮
-      } else if (!_rescueInFlight && !state.items.length && hostReady && settings.assetDir && !MOCK) {
+      } else if (!_rescueInFlight && !_rebuildRunning && !state.items.length && hostReady && settings.assetDir && !MOCK) {
         // ⚠ 兜底救回：同步跑完了但素材仍是 0 条（分片扫描链路异常/旧脚本残留等）
         //    → 稍后用无状态的简单枚举通道强制重建一次，确保磁盘上有的素材一定显示得出来
+        //    _rebuildRunning 检查：全量重建进行中时跳过（重建完素材自然就有，避免互踩作废）
         _rescueInFlight = true;
         setTimeout(async () => {
           try {
-            if (!state.items.length) {
+            if (!state.items.length && !_rebuildRunning) {
               console.warn("[MuMu助手] 同步后仍无素材，启用简单枚举救回");
               const n = await simpleRebuildAssets();
               if (n > 0) renderAll();
@@ -2281,37 +2284,50 @@
     if (MOCK || !hostReady || !settings.assetDir) return 0;
     _syncPending = null;
     const seq = ++_syncSeq;                 // 作废在途的分片扫描，避免两套通道互踩
+    _rebuildRunning = true;                 // 重建进行中：兜底救回跳过，避免 1.5s 后互踩作废本次重建
+    let failedCats = 0;
     const items = [];
-    for (const c of state.categories) {
-      if (seq !== _syncSeq) return -1;
-      const dirName = c.dir || safeDirName(c.name);
-      try {
-        const body = payload(await evalScript(
-          "PSL_ListCatAssets('" + esc(settings.assetDir) + "','" + esc(dirName) + "')"
-        ));
+    try {
+      for (const c of state.categories) {
         if (seq !== _syncSeq) return -1;
-        if (body) {
-          for (const ln of String(body).split("|")) {
-            if (!ln) continue;
-            const it = parseScanLine(ln);
-            if (it) {
-              if (it._fp) { scanIndex[it.file] = it._fp; delete it._fp; }
-              items.push(it);
+        const dirName = c.dir || safeDirName(c.name);
+        try {
+          // ⚠ 120s 长超时：大库/慢机（PS2024 等）枚举大量文件可能超过默认 15s，
+          //   超时静默丢分类素材 → “磁盘有、面板无”的元凶之一
+          const body = payload(await evalScript(
+            "PSL_ListCatAssets('" + esc(settings.assetDir) + "','" + esc(dirName) + "')",
+            120000
+          ));
+          if (seq !== _syncSeq) return -1;
+          if (body) {
+            for (const ln of String(body).split("|")) {
+              if (!ln) continue;
+              const it = parseScanLine(ln);
+              if (it) {
+                if (it._fp) { scanIndex[it.file] = it._fp; delete it._fp; }
+                items.push(it);
+              }
             }
           }
+        } catch (e) {
+          console.error("[MuMu助手] 简单枚举分类失败 " + dirName + ":", e);
+          failedCats++;
         }
-      } catch (e) { console.error("[MuMu助手] 简单枚举分类失败 " + dirName + ":", e); }
+      }
+      if (seq !== _syncSeq) return -1;
+      state.items = items;                     // 磁盘即真相：整体替换，绝不与旧条目合并
+      allScanned = true;
+      scannedCats.clear();
+      state.categories.forEach((c) => scannedCats.add(c.id));
+      _rebuildFailCats = failedCats;
+      saveState();
+      saveScanIndex();
+      scheduleIndexWrite();   // 重建完成后把磁盘真相固化进索引
+      console.log("[MuMu助手] 简单枚举重建完成: 素材=" + items.length + (failedCats ? " 失败分类=" + failedCats : ""));
+      return items.length;
+    } finally {
+      _rebuildRunning = false;
     }
-    if (seq !== _syncSeq) return -1;
-    state.items = items;                     // 磁盘即真相：整体替换，绝不与旧条目合并
-    allScanned = true;
-    scannedCats.clear();
-    state.categories.forEach((c) => scannedCats.add(c.id));
-    saveState();
-    saveScanIndex();
-    scheduleIndexWrite();   // 重建完成后把磁盘真相固化进索引
-    console.log("[MuMu助手] 简单枚举重建完成: 素材=" + items.length);
-    return items.length;
   }
 
   /* ============================================================
@@ -2825,16 +2841,29 @@
   async function rebuildAfterSync() {
     const n = await simpleRebuildAssets();
     if (n < 0) throw new Error("全量重建被并发的同步打断，请重试");
+    if (_rebuildFailCats > 0)
+      toast("有 " + _rebuildFailCats + " 个分类枚举失败，素材可能缺失，请稍后重试", true);
     renderAll();
     return n;
   }
 
-  // 同步完成后若面板仍停在欢迎界面（首开/上次未进分类），自动跳到第一个有素材的分类，
-  // 否则用户会看到一片空的欢迎页，误以为素材没有同步进来
+  // 同步完成后面板仍停在看不到素材的视图时，自动跳到一个有素材的分类：
+  // ① 欢迎界面（filterCat 空）：直接跳第一个非空分类；
+  // ② 停在具体分类且该分类恰好没有素材（同步的素材进了别的分类）：
+  //    ⚠ 也跳——否则用户看到的就是“磁盘有素材、面板没有”
   function jumpToCategoryWithItems() {
-    if (filterCat) return;   // 已在具体分类视图，不打扰用户
+    if (filterCat === TRASH_VIEW) return;   // 回收站视图不打扰
     const counts = {};
     for (const it of state.items) counts[it.categoryId] = (counts[it.categoryId] || 0) + 1;
+    if (filterCat) {
+      if ((counts[filterCat] || 0) > 0) return;   // 当前分类有素材，不打扰
+      const first = state.categories.find((c) => counts[c.id] > 0);
+      if (first) {
+        setFilter(first.id);
+        toast("素材已同步到「" + first.name + "」，当前分类无素材，已自动切换");
+      }
+      return;
+    }
     const first = state.categories.find((c) => counts[c.id] > 0);
     if (first) {
       setFilter(first.id);
