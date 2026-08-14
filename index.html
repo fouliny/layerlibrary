@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MuMu助手</title>
+  <script>
+    // ============================================================
+    //  Flex-gap 支持检测（必须在 styles.css 之前执行）
+    //  PS2020（Chromium 61）和 PS2021（Chromium 74）不支持 flexbox gap
+    //  （Chrome 84+ 才全面支持）。检测到不支持时给 <html> 加 .no-flex-gap
+    //  类，styles.css 末尾的规则会用 margin 兜底，避免元素挤在一起。
+    //  放在 <link> 之前是为了在首次渲染前就定好布局类，消除闪烁。
+    // ============================================================
+    (function () {
+      try {
+        var el = document.createElement('div');
+        el.style.cssText = 'display:flex;gap:10px;position:absolute;visibility:hidden;width:100px;';
+        el.innerHTML = '<div style="width:1px;height:10px;"></div><div style="width:1px;height:10px;"></div>';
+        document.documentElement.appendChild(el);
+        var r1 = el.children[0].getBoundingClientRect();
+        var r2 = el.children[1].getBoundingClientRect();
+        var hasGap = (r2.left - r1.right) >= 9;  // gap=10px，容差 1px
+        document.documentElement.removeChild(el);
+        if (!hasGap) document.documentElement.className += ' no-flex-gap';
+      } catch (e) {
+        document.documentElement.className += ' no-flex-gap';
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="body-wrap">
+    <!-- 宽面板（≥520px）下左侧常驻分类列表；窄面板由 CSS 隐藏，改回顶部下拉 -->
+    <div class="side" id="catSidebar">
+      <div class="side-list" id="catSideList"></div>
+      <div class="side-sep"></div>
+      <div class="dd-item dd-new" id="sideNewCat" title="新建分类">
+        <span class="dd-name">+ 新建分类…</span>
+      </div>
+      <div class="dd-item dd-trash" id="sideTrash" title="查看已删除的素材，可还原">
+        <span class="dd-name">🗑 回收站</span>
+        <span class="dd-count" id="sideCountTrash">0</span>
+      </div>
+    </div>
+
+    <div class="panel" id="app">
+    <!-- 顶部工具栏：分类下拉 + 同步状态 + 搜索 + 设置 -->
+    <div class="toolbar">
+      <div class="dropdown" id="catDropdown">
+        <button class="dd-trigger" id="catTrigger" type="button" title="选择分类">
+          <span class="dd-label" id="catLabel">未分类</span>
+          <svg class="dd-caret" viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M7 10l5 5 5-5z"/></svg>
+        </button>
+        <div class="dd-menu" id="catMenu" hidden>
+          <div id="catMenuList"></div>
+          <div class="dd-sep"></div>
+          <div class="dd-item dd-new" id="catNew">
+            <span class="dd-name">+ 新建分类…</span>
+          </div>
+          <div class="dd-sep"></div>
+          <div class="dd-item dd-trash" id="catTrash" title="查看已删除的素材，可还原">
+            <span class="dd-name">🗑 回收站</span>
+            <span class="dd-count" id="catCountTrash">0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="search">
+        <svg class="search-ico" viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M21 21l-4.3-4.3M11 19a8 8 0 1 1 0-16 8 8 0 0 1 0 16Z"/></svg>
+        <input type="text" id="searchInput" placeholder="搜索图层…" />
+      </div>
+
+      <div class="sort-bar" id="sortBar" title="排序方式">
+        <button type="button" class="sort-key" data-key="manual">手动</button>
+        <button type="button" class="sort-key" data-key="time">时间</button>
+        <button type="button" class="sort-key" data-key="name">名称</button>
+        <button type="button" class="sort-key" data-key="size">大小</button>
+        <button type="button" class="sort-dir" id="sortDirBtn" title="升降序切换">
+          <svg id="sortDirIco" viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M7 14l5 5 5-5H7z"/></svg>
+        </button>
+      </div>
+
+      <button class="btn-ico" id="settingsBtn" type="button" title="设置">
+        <svg viewBox="0 0 24 24" width="15" height="15">
+          <path fill="currentColor" d="M12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zm7.4-2.6.1-.9-.1-.9 1.9-1.4-1.9-3.3-2.2.9a7.3 7.3 0 0 0-1.6-.9L15.2 4H8.8l-.4 2.4c-.6.2-1.1.5-1.6.9l-2.2-.9-1.9 3.3 1.9 1.4-.1.9.1.9-1.9 1.4 1.9 3.3 2.2-.9c.5.4 1 .7 1.6.9l.4 2.4h6.4l.4-2.4c.6-.2 1.1-.5 1.6-.9l2.2.9 1.9-3.3-1.9-1.4z"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- 内容区（同时是外部图片拖放区） -->
+    <div class="content" id="content">
+      <div class="content-head">
+        <span class="ch-title" id="currentCatName">未分类</span>
+        <span class="ch-count" id="itemCount">0</span>
+      </div>
+      <div class="grid" id="grid"></div>
+      <div class="empty" id="emptyState">
+        <div class="empty-icon">▦</div>
+        <p id="emptyTitle">还没有保存的图层</p>
+        <span id="emptyHint">在 PS 中选中图层后点下方按钮收藏<br>也可以直接把图片文件拖进这里</span>
+      </div>
+
+      <!-- 欢迎界面：首次打开 / 上次分类丢失时显示 -->
+      <div class="welcome" id="welcomeState" hidden>
+        <div class="welcome-icon">🎨</div>
+        <h2 class="welcome-title">欢迎使用 MuMu助手</h2>
+        <p class="welcome-desc">PS 图层素材管理助手<br>把常用图层、效果、组件保存下来，随时复用</p>
+        <div class="welcome-actions">
+          <button class="btn-primary" id="welcomeNewCat" type="button">新建第一个分类</button>
+        </div>
+        <span class="welcome-tip">提示：在 PS 中选中图层后点底部按钮即可保存到当前分类</span>
+      </div>
+
+      <div class="init-loading" id="initLoading">
+        <div class="spin"></div>
+        <p>正在扫描素材库…</p>
+      </div>
+
+      <!-- 拖入文件时的高亮遮罩 -->
+      <div class="dropzone" id="dropzone" hidden>
+        <div class="dz-inner">
+          <div class="dz-icon">＋</div>
+          <p>松开即可加入 MuMu助手</p>
+          <span id="dzCat">当前分类：未分类</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 底部操作栏 -->
+    <div class="footer">
+      <button class="btn-primary block" id="saveBtn" type="button" title="把 PS 中选中的图层存入当前分类（选几个存几个）">
+        <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 3v12m0-12 4 4m-4-4-4 4M5 21h14"/></svg>
+        保存图层
+      </button>
+    </div>
+
+    <div class="toast" id="toast"></div>
+  </div><!-- /.panel -->
+  </div><!-- /.body-wrap -->
+
+  <!-- 右键 / 更多 菜单 -->
+  <div class="ctx-menu" id="ctxMenu" hidden>
+    <!-- 普通视图 -->
+    <div class="ctx-item" data-grp="normal" data-act="insert">
+      <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 16V4m0 12 4-4m-4 4-4-4M5 20h14"/></svg>
+      插入到画布
+    </div>
+    <div class="ctx-sep" data-grp="normal"></div>
+    <div class="ctx-item" data-grp="normal" data-act="rename">
+      <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M4 20h4l10-10-4-4L4 16v4zM14 6l4 4"/></svg>
+      重命名
+    </div>
+    <div class="ctx-item ctx-sub" data-grp="normal" data-act="move">
+      <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M4 6h12M4 12h12M4 18h8"/></svg>
+      移动到
+      <svg class="ctx-arrow" viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M9 6l6 6-6 6"/></svg>
+      <div class="ctx-submenu" id="ctxMoveSub"></div>
+    </div>
+    <div class="ctx-sep" data-grp="normal"></div>
+    <div class="ctx-item ctx-danger" data-grp="normal" data-act="delete">
+      <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 7h12M9 7V5h6v2m-7 0 1 12h6l1-12"/></svg>
+      移入回收站
+    </div>
+
+    <!-- 文件已删除（普通视图） -->
+    <div class="ctx-item ctx-danger" data-grp="missing" data-act="remove" hidden>
+      <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 7h12M9 7V5h6v2m-7 0 1 12h6l1-12"/></svg>
+      移出库（文件已删除）
+    </div>
+
+    <!-- 回收站视图 -->
+    <div class="ctx-item" data-grp="trash" data-act="restore" hidden>
+      <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M4 12a8 8 0 1 0 2.3-5.7M4 4v4h4"/></svg>
+      还原到原分类
+    </div>
+    <div class="ctx-sep" data-grp="trash" hidden></div>
+    <div class="ctx-item ctx-danger" data-grp="trash" data-act="purge" hidden>
+      <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 7h12M9 7V5h6v2m-7 0 1 12h6l1-12"/></svg>
+      彻底删除
+    </div>
+  </div>
+
+  <!-- 文本输入弹窗（新建分类 / 重命名） -->
+  <div class="modal-mask" id="modalMask" hidden>
+    <div class="modal">
+      <h3 id="modalTitle">输入名称</h3>
+      <input type="text" id="modalInput" />
+      <div class="modal-actions">
+        <button class="btn-flat" id="modalCancel" type="button">取消</button>
+        <button class="btn-primary sm" id="modalOk" type="button">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 确认弹窗（清空回收站 / 彻底删除等不可逆操作） -->
+  <div class="modal-mask" id="confMask" hidden>
+    <div class="modal">
+      <h3 id="confTitle">确认操作</h3>
+      <p class="conf-msg" id="confMsg"></p>
+      <div class="modal-actions">
+        <button class="btn-flat" id="confCancel" type="button">取消</button>
+        <button class="btn-danger" id="confOk" type="button">确定删除</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 设置弹窗 -->
+  <div class="modal-mask" id="setMask" hidden>
+    <div class="modal wide">
+      <h3>设置</h3>
+
+      <div class="field">
+        <label>素材保存位置</label>
+        <div class="path-row">
+          <input type="text" id="setDir" spellcheck="false" placeholder="素材 PNG 的存放目录" />
+          <button class="btn-ico sm" id="setBrowse" type="button" title="浏览…">
+            <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M3 6h6l2 2h10v10H3z"/></svg>
+          </button>
+          <button class="btn-ico sm" id="setOpen" type="button" title="在资源管理器中打开">
+            <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M14 3h7v7h-2V6.4l-8.3 8.3-1.4-1.4L17.6 5H14zM5 5h5v2H6v11h11v-4h2v6H5z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>点击素材卡片时</label>
+        <select id="setClick">
+          <option value="single">单击直接插入画布</option>
+          <option value="double">双击才插入（防误触）</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label>缩略图大小 <span class="val" id="setSizeVal">92 px</span></label>
+        <input type="range" id="setSize" min="48" max="260" step="4" />
+      </div>
+
+      <div class="field">
+        <label>远程路径素材库</label>
+        <div class="path-row">
+          <input type="text" id="setRemote" spellcheck="false" placeholder="smb://服务器/共享/素材库 或 http://服务器/素材库" />
+          <button class="btn-primary" id="remoteCheck" type="button" title="手动检查远程素材，有更新就同步到本地">检查素材</button>
+        </div>
+        <div class="hint">支持 SMB 共享（smb:// 或 \\服务器\共享）与 HTTP(S) 静态目录（需为 MuMu 素材库根目录，含 .mu_index.json）。仅点击「检查素材」时同步，不会自动更新。</div>
+        <div class="remote-status" id="remoteStatus"></div>
+      </div>
+
+      <div class="field">
+        <label>面板主题（对应 PS「界面 → 颜色方案」4 档）</label>
+        <div class="theme-grid" id="themeGrid">
+          <button type="button" class="theme-chip" data-theme="black"><span class="sw sw-black"></span>深黑</button>
+          <button type="button" class="theme-chip" data-theme="darkgray"><span class="sw sw-darkgray"></span>深灰</button>
+          <button type="button" class="theme-chip" data-theme="midgray"><span class="sw sw-midgray"></span>中灰</button>
+          <button type="button" class="theme-chip" data-theme="light"><span class="sw sw-light"></span>浅灰</button>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn-flat" id="setCancel" type="button">取消</button>
+        <button class="btn-primary sm" id="setOk" type="button">保存</button>
+      </div>
+
+      <div class="hint" id="verInfo" style="margin-top:6px;"></div>
+
+      <div class="author-line">
+        <span>作者 · </span>
+        <span class="author-name">木杉</span>
+        <span class="author-sep">·</span>
+        <span class="author-vx-label">VX：</span>
+        <span class="author-vx" id="authorVx" title="点击复制">fouliny</span>
+        <span class="author-tag">欢迎交流反馈 ✦</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>
