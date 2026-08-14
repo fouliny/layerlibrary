@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = 21;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = 22;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = 0;             // 检测到的 hostscript 实际版本（设置面板展示）
   async function _loadHostJsx() {
     try {
@@ -2486,6 +2486,7 @@
   const setRemote = $("#setRemote");
   const remoteCheck = $("#remoteCheck");
   const remoteStatusEl = $("#remoteStatus");
+  const updateCheck = $("#updateCheck");
 
   function markThemeChips(key) {
     themeGrid.querySelectorAll(".theme-chip").forEach((el) => {
@@ -2500,7 +2501,7 @@
     setSizeVal.textContent = setSize.value + " px";
     setRemote.value = settings.remotePath || "";
     setRemoteStatus("");
-    const verEl = $("#verInfo");
+    const verEl = $("#verText");
     if (verEl) {
       verEl.textContent = "MuMu助手 v" + REQUIRED_SCRIPT_VERSION +
         (hostScriptVersion > 0
@@ -2910,6 +2911,129 @@
   }
 
   remoteCheck.addEventListener("click", () => syncRemoteAssets());
+  
+    /* ============================================================
+       检查更新：查询 GitHub Releases，有新版本则静默下载并覆盖部署
+       链路：fetch API 查最新版本 → 生成 ps1（下载/解压/覆盖/写结果）
+         → JSX 落盘 + vbs 隐藏窗口启动 → 轮询 result.txt → toast 结果
+       ============================================================ */
+    let _updating = false;
+  
+    // 插件安装目录（与 _loadHostJsx 相同的取法，正斜杠、去尾斜杠）
+    function getExtDir() {
+      try {
+        let ext = "";
+        try { ext = String(cep.fs.getSystemPath(cep.fs.EXTENSION)); } catch (eFs) {}
+        if (!ext) { try { ext = String(cep.getSystemPath("extension")); } catch (e2) {} }
+        if (!ext) return "";
+        ext = decodeURI(String(ext)).replace(/^file:\/{2,3}/, "").replace(/\\/g, "/");
+        return ext.replace(/\/+$/, "");
+      } catch (e) { return ""; }
+    }
+  
+    // 生成更新脚本（全 ASCII；ps1 由 PowerShell 执行，单引号字符串避免转义地狱）
+    function buildUpdatePs1(tag, extDir) {
+      return [
+        "$ErrorActionPreference = 'Stop'",
+        "Start-Sleep -Seconds 1",
+        "$tmp = Join-Path $env:TEMP 'MuMuHelper_update'",
+        "$zip = Join-Path $tmp 'update.zip'",
+        "$ex  = Join-Path $tmp 'ex'",
+        "$res = Join-Path $tmp 'result.txt'",
+        "$url = 'https://github.com/fouliny/layerlibrary/releases/download/" + tag + "/MuMuHelper-" + tag + ".zip'",
+        "$ext = '" + extDir + "'",
+        "if (Test-Path $res) { Remove-Item $res -Force }",
+        "if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Path $tmp | Out-Null }",
+        "$err = ''",
+        "try {",
+        "  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
+        "  Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 180",
+        "  if ((Get-Item $zip).Length -lt 10000) { throw 'size' }",
+        "} catch { $err = 'DOWNLOAD' }",
+        "if (-not $err) {",
+        "  try {",
+        "    if (Test-Path $ex) { Remove-Item $ex -Recurse -Force }",
+        "    Expand-Archive -Path $zip -DestinationPath $ex -Force",
+        "    if (-not (Test-Path (Join-Path $ex 'CSXS/manifest.xml'))) { throw 'manifest' }",
+        "  } catch { $err = 'EXTRACT' }",
+        "}",
+        "if (-not $err) {",
+        "  try { Copy-Item (Join-Path $ex '*') $ext -Recurse -Force } catch { $err = 'COPY' }",
+        "}",
+        "if ($err) { ('ERR:' + $err) | Out-File $res -Encoding ascii } else { 'OK' | Out-File $res -Encoding ascii }",
+        "Remove-Item $zip -Force -ErrorAction SilentlyContinue",
+        "Remove-Item $ex -Recurse -Force -ErrorAction SilentlyContinue"
+      ].join("\n");
+    }
+  
+    // 轮询更新结果：OK / ERR:<阶段码> / 超时返回 ERR:TIMEOUT
+    function pollUpdateResult() {
+      return new Promise((resolve) => {
+        let tries = 0;
+        const timer = setInterval(async () => {
+          tries++;
+          try {
+            const r = await evalScript("PSL_ReadUpdateResult()");
+            if (r.indexOf("PENDING") >= 0 && tries < 120) return;   // 还在跑，继续等
+            clearInterval(timer);
+            resolve(r);
+          } catch (e) {
+            if (tries < 120) return;   // 宿主瞬时忙，再等一轮
+            clearInterval(timer);
+            resolve("ERR:TIMEOUT");
+          }
+        }, 1500);
+      });
+    }
+  
+    // 静默下载并覆盖部署：成功 → “升级完成，请重启 PS”
+    async function applyUpdate(tag) {
+      const extDir = getExtDir();
+      if (!extDir) throw new Error("无法定位插件目录");
+      if (!hostReady) throw new Error("PS 联动未就绪，请重开面板后重试");
+      const r = await evalScript("PSL_ApplyUpdate('" + esc(buildUpdatePs1(tag, extDir)) + "')");
+      if (String(r).indexOf("ERR:") === 0) throw new Error(String(r).slice(4));
+      const res = await pollUpdateResult();
+      const m = String(res || "").replace(/^OK:/, "");
+      if (m === "OK") { toast("升级完成，请重启 PS 生效"); return; }
+      if (m === "ERR:DOWNLOAD") throw new Error("下载更新包失败（网络/代理问题），请稍后重试");
+      if (m === "ERR:EXTRACT") throw new Error("更新包解压失败，安装包可能损坏，请重新检查");
+      if (m === "ERR:COPY") throw new Error("覆盖插件文件失败（文件被占用？），请手动部署");
+      if (m === "ERR:TIMEOUT") throw new Error("更新超时，请稍后重试");
+      throw new Error("更新失败（" + (m || "未知原因") + "）");
+    }
+  
+    async function checkForUpdate() {
+      if (MOCK) { toast("演示模式无法检查更新", true); return; }
+      if (_updating) return;
+      _updating = true;
+      updateCheck.disabled = true;
+      updateCheck.textContent = "检查中…";
+      try {
+        // GitHub API 支持 CORS，CEP 的 fetch 可直接查询（20s 超时由 fetchTimeout 兜底）
+        const ctrl = new AbortController();
+        const resp = await fetchTimeout("https://api.github.com/repos/fouliny/layerlibrary/releases/latest", ctrl);
+        if (!resp.ok) throw new Error("查询失败（HTTP " + resp.status + "）");
+        const data = await resp.json();
+        const tag = String(data.tag_name || "");
+        const latest = parseInt(tag.replace(/[^0-9]/g, ""), 10);
+        if (!latest) throw new Error("版本号解析失败（" + tag + "）");
+        if (latest <= REQUIRED_SCRIPT_VERSION) {
+          toast("已是最新版本 v" + REQUIRED_SCRIPT_VERSION);
+          return;
+        }
+        toast("发现新版本 v" + latest + "，正在后台下载更新…");
+        await applyUpdate(tag);
+      } catch (e) {
+        toast("检查更新失败：" + e.message, true);
+      } finally {
+        _updating = false;
+        updateCheck.disabled = false;
+        updateCheck.textContent = "检查更新";
+      }
+    }
+  
+    updateCheck.addEventListener("click", () => checkForUpdate());
 
   /* ============================================================
      Toast
