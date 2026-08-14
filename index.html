@@ -242,6 +242,7 @@
         <div class="path-row">
           <input type="text" id="setRemote" spellcheck="false" placeholder="smb://服务器/共享/素材库 或 http://服务器/素材库" />
           <button class="btn-primary" id="remoteCheck" type="button" title="手动检查远程素材，有更新就同步到本地">检查素材</button>
+          <button class="btn-primary" id="rebuildIndex" type="button" title="以磁盘文件夹为准强制重建全部素材索引，磁盘有但面板不显示时点它">重建索引</button>
         </div>
         <div class="hint">支持 SMB 共享（smb:// 或 \\服务器\共享）与 HTTP(S) 静态目录（需为 MuMu 素材库根目录，含 .mu_index.json）。仅点击「检查素材」时同步，不会自动更新。</div>
         <div class="remote-status" id="remoteStatus"></div>
