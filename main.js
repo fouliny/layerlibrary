@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = 27;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = 28;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = 0;             // 检测到的 hostscript 实际版本（设置面板展示）
   async function _loadHostJsx() {
     try {
@@ -2304,9 +2304,34 @@
     let failedCats = 0;
     const items = [];
     try {
-      for (const c of state.categories) {
+      // 遍历源以磁盘为准：先列素材根目录的真实文件夹（JSX 侧已排除回收站），
+      // 不依赖 state.categories —— 否则 syncCategoryFolders 静默失败时，
+      // 同步下载到新文件夹的素材不在 state 分类里 → 重建扫不到 → “磁盘有、面板无”
+      let dirs = [];
+      try {
+        const dl = payload(await evalScript("PSL_ListCatDirs('" + esc(settings.assetDir) + "')"));
+        if (dl) dirs = String(dl).split("|").filter((d) => String(d || "").trim());
+      } catch (e) { /* 枚举磁盘分类失败 → 回退 state.categories */ }
+      const catList = dirs.length ? dirs : state.categories.map((c) => c.dir || safeDirName(c.name));
+      // 磁盘文件夹补全进面板分类（保留已有分类的颜色/名称配置，只补新分类）
+      if (dirs.length) {
+        const known = {};
+        state.categories.forEach((c) => { known[(c.dir || safeDirName(c.name)).toLowerCase()] = 1; });
+        let added = 0;
+        for (const d of dirs) {
+          const nm = String(d).trim();
+          const key = nm.toLowerCase();
+          if (known[key]) continue;
+          const dup = state.categories.find((c) => c.name && c.name.toLowerCase() === key);
+          if (dup) { dup.dir = nm; known[key] = 1; continue; }
+          state.categories.push({ id: "c" + Date.now().toString(36) + added, name: nm, dir: nm, color: pickColor() });
+          known[key] = 1;
+          added++;
+        }
+        if (added) toast("已从素材文件夹同步 " + added + " 个分类");
+      }
+      for (const dirName of catList) {
         if (seq !== _syncSeq) return -1;
-        const dirName = c.dir || safeDirName(c.name);
         try {
           // ⚠ 120s 长超时：大库/慢机（PS2024 等）枚举大量文件可能超过默认 15s，
           //   超时静默丢分类素材 → “磁盘有、面板无”的元凶之一
@@ -2485,6 +2510,7 @@
   const themeGrid = $("#themeGrid");
   const setRemote = $("#setRemote");
   const remoteCheck = $("#remoteCheck");
+  const rebuildIndex = $("#rebuildIndex");
   const remoteStatusEl = $("#remoteStatus");
   const updateCheck = $("#updateCheck");
   const updateProgress = $("#updateProgress");
@@ -2721,11 +2747,13 @@
     settings.remotePath = raw;
     saveSettings();
     remoteCheck.disabled = true;
+    rebuildIndex.disabled = true;
     try {
       if (norm.type === "smb") await syncRemoteSmb(norm.path);
       else await syncRemoteHttp(norm.path);
     } finally {
       remoteCheck.disabled = false;
+      rebuildIndex.disabled = false;
     }
   }
 
@@ -2745,9 +2773,9 @@
         (failedN ? "，失败 " + m[3] + " 个" : ""),
         failedN === 0
       );
-      // 磁盘已变化：先把新分类文件夹同步成面板分类，再强制全量重建（磁盘即真相），
+      // 磁盘已变化：先同步分类文件夹，再强制全量重建（磁盘即真相），
       // 保证「复制完成 → 面板立即显示」，不依赖可能静默失败的增量扫描
-      await syncCategoryFolders(true);
+      try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 同步后同步分类失败:", e); }
       await rebuildAfterSync();
       reclassifyItems();
       jumpToCategoryWithItems();
@@ -2847,7 +2875,7 @@
     }
     // 磁盘已变化：先同步分类文件夹，再强制全量重建（磁盘即真相），
     // 保证「下载完成 → 面板立即显示」，不依赖可能静默失败的增量扫描
-    await syncCategoryFolders(true);
+    try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 同步后同步分类失败:", e); }
     await rebuildAfterSync();
     reclassifyItems();
     jumpToCategoryWithItems();
@@ -2914,7 +2942,37 @@
     return changed;
   }
 
+  // 手动「重建索引」：以磁盘为准强制全量重建（分类 ← 文件夹，素材 ← 枚举），
+  // 远程同步后面板仍不显示素材时的手动兜底（用户点设置里的「重建索引」按钮）
+  async function rebuildIndexNow() {
+    if (MOCK) { toast("演示模式无法重建索引"); return; }
+    if (!hostReady) { toast("PS 联动未就绪，请重开面板后重试", true); return; }
+    if (!settings.assetDir) { toast("请先在设置里确定素材保存位置", true); return; }
+    if (_rebuildRunning) { toast("重建正在进行中，请稍候", true); return; }
+    rebuildIndex.disabled = true;
+    rebuildIndex.textContent = "重建中…";
+    remoteCheck.disabled = true;
+    try {
+      try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 重建索引同步分类失败:", e); }
+      const n = await simpleRebuildAssets();
+      reclassifyItems();
+      renderAll();
+      jumpToCategoryWithItems();
+      if (n < 0) toast("重建被并发的同步打断，请稍后重试", true);
+      else if (_rebuildFailCats > 0)
+        toast("重建完成：共 " + n + " 个素材（有 " + _rebuildFailCats + " 个分类枚举失败，可能缺失）", true);
+      else toast("重建完成：共 " + n + " 个素材");
+    } catch (e) {
+      toast("重建失败：" + e.message, true);
+    } finally {
+      rebuildIndex.disabled = false;
+      rebuildIndex.textContent = "重建索引";
+      remoteCheck.disabled = false;
+    }
+  }
+
   remoteCheck.addEventListener("click", () => syncRemoteAssets());
+  rebuildIndex.addEventListener("click", () => rebuildIndexNow());
   
     /* ============================================================
        检查更新：查询 GitHub Releases，有新版本则静默下载并覆盖部署
