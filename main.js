@@ -265,9 +265,13 @@
     });
   }
   // 业务调用：ERR: / EvalScript error 一律 reject
-  async function evalScript(jsx) {
-    const s = await rawEval(jsx);
-    if (s.indexOf("EvalScript error") >= 0 || s.indexOf("EvalScript timeout") >= 0)
+  // ⚠ timeout 参数：远程同步（SMB 枚举 + 分块复制）可能远超默认 15 秒，
+  //   必须显式传长超时（120s），否则会被超时兜底误报“脚本未加载”
+  async function evalScript(jsx, timeout) {
+    const s = await rawEval(jsx, timeout);
+    if (s.indexOf("EvalScript timeout") >= 0)
+      throw new Error("宿主脚本执行超时（远程同步较慢或 PS 被对话框阻塞，请重试）");
+    if (s.indexOf("EvalScript error") >= 0)
       throw new Error("宿主脚本执行失败（hostscript.jsx 未加载或语法错误）");
     if (s === "undefined" || s === "")
       throw new Error("宿主脚本无返回值（函数可能不存在）");
@@ -293,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = 18;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = 19;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = 0;             // 检测到的 hostscript 实际版本（设置面板展示）
   async function _loadHostJsx() {
     try {
@@ -2693,7 +2697,8 @@
     setRemoteStatus("正在连接远程素材库…");
     try {
       const res = await evalScript(
-        "PSL_SyncRemoteSmb('" + esc(remoteRoot) + "','" + esc(settings.assetDir) + "')"
+        "PSL_SyncRemoteSmb('" + esc(remoteRoot) + "','" + esc(settings.assetDir) + "')",
+        120000
       );
       const m = /added=(\d+),updated=(\d+),failed=(\d+)/.exec(res);
       if (!m) throw new Error(res);
