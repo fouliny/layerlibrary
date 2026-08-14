@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = 25;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = 26;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = 0;             // 检测到的 hostscript 实际版本（设置面板展示）
   async function _loadHostJsx() {
     try {
@@ -2487,6 +2487,10 @@
   const remoteCheck = $("#remoteCheck");
   const remoteStatusEl = $("#remoteStatus");
   const updateCheck = $("#updateCheck");
+  const updateProgress = $("#updateProgress");
+  const updFill = $("#updFill");
+  const updStepText = $("#updStepText");
+  const updDir = $("#updDir");
 
   function markThemeChips(key) {
     themeGrid.querySelectorAll(".theme-chip").forEach((el) => {
@@ -2932,6 +2936,7 @@
     }
   
     // 生成更新脚本（全 ASCII；ps1 由 PowerShell 执行，单引号字符串避免转义地狱）
+    // 阶段进度写 progress.txt：DOWNLOAD <pct>（流式下载真实百分比）→ EXTRACT → INSTALL
     function buildUpdatePs1(tag, extDir) {
       return [
         "$ErrorActionPreference = 'Stop'",
@@ -2940,60 +2945,120 @@
         "$zip = Join-Path $tmp 'update.zip'",
         "$ex  = Join-Path $tmp 'ex'",
         "$res = Join-Path $tmp 'result.txt'",
+        "$prg = Join-Path $tmp 'progress.txt'",
         "$url = 'https://github.com/fouliny/layerlibrary/releases/download/" + tag + "/MuMuHelper-" + tag + ".zip'",
         "$ext = '" + extDir + "'",
         "if (Test-Path $res) { Remove-Item $res -Force }",
+        "if (Test-Path $prg) { Remove-Item $prg -Force }",
         "if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Path $tmp | Out-Null }",
+        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
         "$err = ''",
+        // ① 流式下载：每 64KB 写一次真实百分比，面板进度条实时反映
         "try {",
-        "  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
-        "  Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 180",
+        "  'STEP:DOWNLOAD 0' | Out-File $prg -Encoding ascii",
+        "  $req = [System.Net.HttpWebRequest]::Create($url)",
+        "  $req.Timeout = 180000",
+        "  $resp = $req.GetResponse()",
+        "  try {",
+        "    $total = [int64]$resp.ContentLength",
+        "    $stream = $resp.GetResponseStream()",
+        "    $fs = [System.IO.File]::Create($zip)",
+        "    try {",
+        "      $buf = New-Object byte[] 65536",
+        "      $done = [int64]0",
+        "      while (($n = $stream.Read($buf, 0, $buf.Length)) -gt 0) {",
+        "        $fs.Write($buf, 0, $n)",
+        "        $done = $done + $n",
+        "        if ($total -gt 0) {",
+        "          $pct = [int](100 * $done / $total)",
+        "          'STEP:DOWNLOAD ' + $pct | Out-File $prg -Encoding ascii",
+        "        }",
+        "      }",
+        "    } finally { $fs.Close() }",
+        "  } finally { $resp.Close() }",
         "  if ((Get-Item $zip).Length -lt 10000) { throw 'size' }",
         "} catch { $err = 'DOWNLOAD' }",
+        // ② 解压 + 校验
         "if (-not $err) {",
         "  try {",
+        "    'STEP:EXTRACT' | Out-File $prg -Encoding ascii",
         "    if (Test-Path $ex) { Remove-Item $ex -Recurse -Force }",
         "    Expand-Archive -Path $zip -DestinationPath $ex -Force",
         "    if (-not (Test-Path (Join-Path $ex 'CSXS/manifest.xml'))) { throw 'manifest' }",
         "  } catch { $err = 'EXTRACT' }",
         "}",
+        // ③ 覆盖安装
         "if (-not $err) {",
-        "  try { Copy-Item (Join-Path $ex '*') $ext -Recurse -Force } catch { $err = 'COPY' }",
+        "  try {",
+        "    'STEP:INSTALL' | Out-File $prg -Encoding ascii",
+        "    Copy-Item (Join-Path $ex '*') $ext -Recurse -Force",
+        "  } catch { $err = 'COPY' }",
         "}",
         "if ($err) { ('ERR:' + $err) | Out-File $res -Encoding ascii } else { 'OK' | Out-File $res -Encoding ascii }",
         "Remove-Item $zip -Force -ErrorAction SilentlyContinue",
-        "Remove-Item $ex -Recurse -Force -ErrorAction SilentlyContinue"
+        "Remove-Item $ex -Recurse -Force -ErrorAction SilentlyContinue",
+        "Remove-Item $prg -Force -ErrorAction SilentlyContinue"
       ].join("\n");
     }
-  
-    // 轮询更新结果：OK / ERR:<阶段码> / 超时返回 ERR:TIMEOUT
-    function pollUpdateResult() {
+    
+    // 更新进度条 UI：DOWNLOAD pct → 百分比；EXTRACT/INSTALL → 阶段文字
+    function updateProgressUi(s) {
+      if (String(s).indexOf("STEP:DOWNLOAD") === 0) {
+        const pct = parseInt(String(s).split(" ")[1], 10);
+        const p = isNaN(pct) ? 0 : Math.max(0, Math.min(100, pct));
+        updFill.style.width = p + "%";
+        updStepText.textContent = "正在下载更新包… " + p + "%";
+      } else if (String(s).indexOf("STEP:EXTRACT") === 0) {
+        updFill.style.width = "100%";
+        updStepText.textContent = "正在解压更新包…";
+      } else if (String(s).indexOf("STEP:INSTALL") === 0) {
+        updFill.style.width = "100%";
+        updStepText.textContent = "正在覆盖安装…";
+      }
+    }
+    
+    // 轮询更新：每轮先读进度更新进度条，再读结果；有结果或超时(160s)返回
+    function pollUpdate() {
       return new Promise((resolve) => {
         let tries = 0;
         const timer = setInterval(async () => {
           tries++;
           try {
+            const p = await evalScript("PSL_ReadUpdateProgress()");
+            updateProgressUi(String(p).replace(/^OK:/, ""));
             const r = await evalScript("PSL_ReadUpdateResult()");
-            if (r.indexOf("PENDING") >= 0 && tries < 120) return;   // 还在跑，继续等
+            if (r.indexOf("PENDING") >= 0 && tries < 160) return;   // 还在跑，继续等
             clearInterval(timer);
             resolve(r);
           } catch (e) {
-            if (tries < 120) return;   // 宿主瞬时忙，再等一轮
+            if (tries < 160) return;   // 宿主瞬时忙，再等一轮
             clearInterval(timer);
             resolve("ERR:TIMEOUT");
           }
-        }, 1500);
+        }, 1000);
       });
     }
-  
-    // 静默下载并覆盖部署：成功 → “升级完成，请重启 PS”
+    
+    // 静默下载并覆盖部署：进度条实时展示下载/解压/安装阶段；成功 → “升级完成，请重启 PS”
     async function applyUpdate(tag) {
       const extDir = getExtDir();
       if (!extDir) throw new Error("无法定位插件目录");
       if (!hostReady) throw new Error("PS 联动未就绪，请重开面板后重试");
+      // 展示进度条 + 下载位置（%TEMP%/MuMuHelper_update，更新完自动清理）
+      try {
+        const d = await evalScript("PSL_GetUpdateDir()");
+        updDir.textContent = "下载位置：" + String(d).replace(/^OK:/, "");
+      } catch (e) {}
+      updateProgress.hidden = false;
+      updFill.style.width = "0%";
+      updStepText.textContent = "正在准备更新…";
       const r = await evalScript("PSL_ApplyUpdate('" + esc(buildUpdatePs1(tag, extDir)) + "')");
-      if (String(r).indexOf("ERR:") === 0) throw new Error(String(r).slice(4));
-      const res = await pollUpdateResult();
+      if (String(r).indexOf("ERR:") === 0) {
+        updateProgress.hidden = true;
+        throw new Error(String(r).slice(4));
+      }
+      const res = await pollUpdate();
+      updateProgress.hidden = true;
       const m = String(res || "").replace(/^OK:/, "");
       if (m === "OK") { toast("升级完成，请重启 PS 生效"); return; }
       if (m === "ERR:DOWNLOAD") throw new Error("下载更新包失败（网络/代理问题），请稍后重试");
@@ -3022,6 +3087,7 @@
           return;
         }
         toast("发现新版本 v" + latest + "，正在后台下载更新…");
+        updateCheck.textContent = "更新中…";
         await applyUpdate(tag);
       } catch (e) {
         const msg = String((e && e.message) || e || "");
