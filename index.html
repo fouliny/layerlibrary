@@ -246,6 +246,10 @@
         </div>
         <div class="hint">支持 SMB 共享（smb:// 或 \\服务器\共享）与 HTTP(S) 静态目录（需为 MuMu 素材库根目录，含 .mu_index.json）。仅点击「检查素材」时同步，不会自动更新。</div>
         <div class="remote-status" id="remoteStatus"></div>
+        <div id="syncProgress" hidden style="margin-top:6px;">
+          <div class="upd-bar"><div class="upd-fill" id="syncFill"></div></div>
+          <div class="upd-meta"><span id="syncStepText">准备中…</span></div>
+        </div>
       </div>
 
       <div class="field">

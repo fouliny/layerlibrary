@@ -20,7 +20,7 @@ var _PSL_INDEX_NAME = ".mu_index.json";
 // 脚本版本号：每次改动 hostscript 后 +1。
 // 面板启动时用它检测 PS 内存里是否还是旧版脚本：ExtendScript 全局在 PS 运行期间
 // 一直保留，旧函数不会自动更新 —— 不重加载新函数就不存在 → 扫描静默失败（只显分类不显素材）
-var PSL_SCRIPT_VERSION = 28;
+var PSL_SCRIPT_VERSION = 29;
 function PSL_Version() {
     return "OK:" + PSL_SCRIPT_VERSION;
 }
@@ -571,6 +571,34 @@ function _pslCopyFile(srcFs, dstFs) {
     }
 }
 
+// 同步进度落盘（SMB 同步是单次桥接调用，面板侧用轮询读这个文件显示进度条）
+function _pslWriteSyncProg(text) {
+    try {
+        var d = new Folder($.getenv("TEMP"));
+        if (!d.exists) return;
+        var f = new File(d.fsName + "/mumu_sync_progress.txt");
+        f.encoding = "UTF-8";
+        f.open("w");
+        f.writeln(text);
+        f.close();
+    } catch (e) {}
+}
+
+// 读取同步进度（面板轮询）：OK:NONE / OK:STEP:SCAN / OK:STEP:COPY|curCat|totalCats|分类名 / OK:STEP:DONE
+function PSL_ReadSyncProgress() {
+    try {
+        var f = new File($.getenv("TEMP") + "/mumu_sync_progress.txt");
+        if (!f.exists) return "OK:NONE";
+        f.encoding = "UTF-8";
+        f.open("r");
+        var t = f.read();
+        f.close();
+        return "OK:" + (t || "").replace(/[\r\n]+$/, "");
+    } catch (e) {
+        return "ERR:" + e.message;
+    }
+}
+
 function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
     try {
         var rr = _pslNorm(remoteRoot);
@@ -579,7 +607,19 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
         var loc = _pslDir(localRoot);
         if (!loc) return "ERR:本地素材根目录不可用";
         var cats = rem.getFiles();
-        var added = 0, updated = 0, failed = 0;
+        // 先统计有效分类文件夹数（进度条按分类粒度显示）
+        var totalCats = 0;
+        for (var t = 0; t < cats.length; t++) {
+            var ct = cats[t];
+            if (!(ct instanceof Folder)) continue;
+            var ctn = ct.name;
+            try { ctn = decodeURI(ctn); } catch (eDT) {}
+            if (ctn.charAt(0) === ".") continue;
+            if (ctn === _PSL_TRASH) continue;
+            totalCats++;
+        }
+        var added = 0, updated = 0, failed = 0, curCat = 0;
+        _pslWriteSyncProg("STEP:SCAN");
         for (var i = 0; i < cats.length; i++) {
             var c = cats[i];
             if (!(c instanceof Folder)) continue;
@@ -587,6 +627,8 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
             try { cname = decodeURI(cname); } catch (eD) {}
             if (cname.charAt(0) === ".") continue;
             if (cname === _PSL_TRASH) continue;
+            curCat++;
+            _pslWriteSyncProg("STEP:COPY|" + curCat + "|" + totalCats + "|" + cname);
             var localCat = new Folder(loc.fsName + "/" + c.name);
             var files = c.getFiles();
             for (var j = 0; j < files.length; j++) {
@@ -631,8 +673,10 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
                 if (isNew) added++; else updated++;
             }
         }
+        _pslWriteSyncProg("STEP:DONE");
         return "OK:added=" + added + ",updated=" + updated + ",failed=" + failed;
     } catch (e) {
+        try { _pslWriteSyncProg("STEP:DONE"); } catch (eW) {}
         return "ERR:" + e.message;
     }
 }

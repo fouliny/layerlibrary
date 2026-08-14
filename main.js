@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = 28;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = 29;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = 0;             // 检测到的 hostscript 实际版本（设置面板展示）
   async function _loadHostJsx() {
     try {
@@ -2296,7 +2296,7 @@
      逐分类调 PSL_ListCatAssets，一次性拿全量 → 清空重建 items。
      切库强制重建的首选通道；分片扫描异常时的可靠兜底。
      ============================================================ */
-  async function simpleRebuildAssets() {
+  async function simpleRebuildAssets(onProgress) {
     if (MOCK || !hostReady || !settings.assetDir) return 0;
     _syncPending = null;
     const seq = ++_syncSeq;                 // 作废在途的分片扫描，避免两套通道互踩
@@ -2332,6 +2332,9 @@
       }
       for (const dirName of catList) {
         if (seq !== _syncSeq) return -1;
+        const catIdx = catList.indexOf(dirName);
+        if (onProgress)
+          onProgress(Math.round((catIdx + 1) / catList.length * 100), "正在重建索引 " + (catIdx + 1) + "/" + catList.length + "：" + dirName);
         try {
           // ⚠ 120s 长超时：大库/慢机（PS2024 等）枚举大量文件可能超过默认 15s，
           //   超时静默丢分类素材 → “磁盘有、面板无”的元凶之一
@@ -2512,6 +2515,9 @@
   const remoteCheck = $("#remoteCheck");
   const rebuildIndex = $("#rebuildIndex");
   const remoteStatusEl = $("#remoteStatus");
+  const syncProgress = $("#syncProgress");
+  const syncFill = $("#syncFill");
+  const syncStepText = $("#syncStepText");
   const updateCheck = $("#updateCheck");
   const updateProgress = $("#updateProgress");
   const updFill = $("#updFill");
@@ -2698,6 +2704,40 @@
     remoteStatusEl.className = "remote-status" + (ok === undefined ? "" : ok ? " ok" : " err");
   }
 
+  // 操作进度条（「检查素材」「重建索引」共用）：pct 传 null 隐藏，0-100 显示
+  function setSyncProgress(pct, text) {
+    if (!syncProgress) return;
+    if (pct == null) { syncProgress.hidden = true; return; }
+    syncProgress.hidden = false;
+    syncFill.style.width = (pct < 0 ? 0 : pct > 100 ? 100 : pct) + "%";
+    syncStepText.textContent = text || "";
+  }
+
+  let _syncPollTimer = null;
+  function stopSyncPoll() {
+    if (_syncPollTimer) { clearInterval(_syncPollTimer); _syncPollTimer = null; }
+  }
+  // SMB 同步是单次桥接调用（JSX 端复制文件），期间拿不到返回 → 轮询 JSX 写的进度文件
+  function startSyncPoll() {
+    stopSyncPoll();
+    _syncPollTimer = setInterval(async () => {
+      try {
+        const m = /^OK:(.*)$/.exec(String(await evalScript("PSL_ReadSyncProgress()") || ""));
+        if (!m) return;
+        const parts = String(m[1]).split("|");
+        if (parts[0] === "STEP:SCAN") {
+          setSyncProgress(0, "正在对比远程素材…");
+        } else if (parts[0] === "STEP:COPY") {
+          const cur = Number(parts[1]) || 0, tot = Number(parts[2]) || 1;
+          const pct = Math.round(cur / tot * 100);
+          setSyncProgress(pct, "正在复制素材 " + cur + "/" + tot + " 个分类" + (parts[3] ? "：" + parts[3] : ""));
+        } else if (parts[0] === "STEP:DONE") {
+          setSyncProgress(100, "复制完成，正在重建索引…");
+        }
+      } catch (e) { /* 轮询失败忽略，下次再试 */ }
+    }, 500);
+  }
+
   // 解析远程路径：smb:// 、http(s):// 、\\. 前缀 → { type, path }
   function normRemotePath(p) {
     const s = String(p || "").trim();
@@ -2760,6 +2800,8 @@
   // SMB / UNC：JSX 端枚举远程分类并复制新增/更新的文件
   async function syncRemoteSmb(remoteRoot) {
     setRemoteStatus("正在连接远程素材库…");
+    setSyncProgress(0, "正在连接远程素材库…");
+    startSyncPoll();
     try {
       const res = await evalScript(
         "PSL_SyncRemoteSmb('" + esc(remoteRoot) + "','" + esc(settings.assetDir) + "')",
@@ -2768,19 +2810,24 @@
       const m = /added=(\d+),updated=(\d+),failed=(\d+)/.exec(res);
       if (!m) throw new Error(res);
       const failedN = Number(m[3]);
+      setSyncProgress(100, "复制完成，正在重建索引…");
+      // 磁盘已变化：先同步分类文件夹，再强制全量重建（磁盘即真相），
+      // 保证「复制完成 → 面板立即显示」，不依赖可能静默失败的增量扫描
+      try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 同步后同步分类失败:", e); }
+      await rebuildAfterSync((p, t) => setSyncProgress(p, t));
+      reclassifyItems();
+      jumpToCategoryWithItems();
+      setSyncProgress(null);
       setRemoteStatus(
         "完成：新增 " + m[1] + " 个，更新 " + m[2] + " 个" +
         (failedN ? "，失败 " + m[3] + " 个" : ""),
         failedN === 0
       );
-      // 磁盘已变化：先同步分类文件夹，再强制全量重建（磁盘即真相），
-      // 保证「复制完成 → 面板立即显示」，不依赖可能静默失败的增量扫描
-      try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 同步后同步分类失败:", e); }
-      await rebuildAfterSync();
-      reclassifyItems();
-      jumpToCategoryWithItems();
     } catch (e) {
+      setSyncProgress(null);
       setRemoteStatus("检查失败：" + e.message, false);
+    } finally {
+      stopSyncPoll();
     }
   }
 
@@ -2788,6 +2835,7 @@
   async function syncRemoteHttp(base) {
     const baseUrl = String(base).replace(/\/+$/, "");
     setRemoteStatus("正在获取远程素材索引…");
+    setSyncProgress(0, "正在获取远程素材索引…");
     let idx;
     try {
       const r = await fetchRemote(baseUrl + "/.mu_index.json");
@@ -2795,10 +2843,11 @@
       idx = await r.json();
     } catch (e) {
       setRemoteStatus("无法获取远程索引：请确认路径是 MuMu 素材库根目录（含 .mu_index.json）且服务器允许访问", false);
+      setSyncProgress(null);
       return;
     }
     const items = (idx && Array.isArray(idx.items)) ? idx.items.filter((it) => it && it.file) : [];
-    if (!items.length) { setRemoteStatus("远程素材库为空", false); return; }
+    if (!items.length) { setRemoteStatus("远程素材库为空", false); setSyncProgress(null); return; }
 
     // 组装同步任务：从索引的绝对路径推出 分类目录名/文件名 → 本地目标 + 远程 URL
     const jobs = [];
@@ -2826,6 +2875,7 @@
       sizes = payload(await evalScript("PSL_GetSizes('" + esc(jobs.map((j) => j.localFile).join("|")) + "')")).split("|");
     } catch (e) {
       setRemoteStatus("本地素材库检查失败：" + e.message, false);
+      setSyncProgress(null);
       return;
     }
     const todo = [];
@@ -2836,19 +2886,27 @@
     });
     if (!todo.length) {
       // 素材已是最新：仍需把磁盘分类文件夹同步成面板分类，并纠正误标未分类的存量条目
+      setSyncProgress(0, "正在同步分类与索引…");
       try { await syncCategoryFolders(true); } catch (e) {}
       reclassifyItems();
       jumpToCategoryWithItems();
+      setSyncProgress(null);
       setRemoteStatus("远程素材与本地一致，无需更新", true);
       return;
     }
 
-    // 逐个下载（素材 → 缩略图 → meta），分片写盘
-    let added = 0, updated = 0, failed = 0;
+    // 逐个下载（素材 → 缩略图 → meta），分片写盘；进度按已下载字节/总字节显示
+    let added = 0, updated = 0, failed = 0, done = 0;
+    const totalBytes = todo.reduce((s, j) => s + (Number(j.it.size) || 0), 0);
+    let doneBytes = 0;
     setRemoteStatus("正在同步 " + todo.length + " 个素材（大文件可能需要一点时间）…");
     for (const j of todo) {
       try {
         const buf = await (await fetchRemote(j.url)).arrayBuffer();
+        doneBytes += buf.byteLength;
+        done++;
+        const pct = totalBytes > 0 ? Math.round(doneBytes / totalBytes * 100) : Math.round(done / todo.length * 100);
+        setSyncProgress(pct, "正在下载素材 " + done + "/" + todo.length + "：" + j.fileName + " " + pct + "%");
         const chunks = bytesToBase64Chunks(buf, 393216);
         await evalScript("PSL_WriteBase64Begin('" + esc(j.localFile) + "')");
         for (const c of chunks) await evalScript("PSL_WriteBase64Chunk('" + c + "')");
@@ -2876,9 +2934,11 @@
     // 磁盘已变化：先同步分类文件夹，再强制全量重建（磁盘即真相），
     // 保证「下载完成 → 面板立即显示」，不依赖可能静默失败的增量扫描
     try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 同步后同步分类失败:", e); }
-    await rebuildAfterSync();
+    setSyncProgress(100, "下载完成，正在重建索引…");
+    await rebuildAfterSync((p, t) => setSyncProgress(p, t));
     reclassifyItems();
     jumpToCategoryWithItems();
+    setSyncProgress(null);
     setRemoteStatus(
       "完成：新增 " + added + " 个，更新 " + updated + " 个" + (failed ? "，失败 " + failed + " 个" : ""),
       failed === 0
@@ -2887,8 +2947,8 @@
 
   // 同步收尾的强制全量重建：从磁盘枚举重建全部素材（含本次同步的），
   // 重建后立即渲染 → 同步完成面板必然显示磁盘上的所有素材
-  async function rebuildAfterSync() {
-    const n = await simpleRebuildAssets();
+  async function rebuildAfterSync(onProgress) {
+    const n = await simpleRebuildAssets(onProgress);
     if (n < 0) throw new Error("全量重建被并发的同步打断，请重试");
     if (_rebuildFailCats > 0)
       toast("有 " + _rebuildFailCats + " 个分类枚举失败，素材可能缺失，请稍后重试", true);
@@ -2952,17 +3012,20 @@
     rebuildIndex.disabled = true;
     rebuildIndex.textContent = "重建中…";
     remoteCheck.disabled = true;
+    setSyncProgress(0, "正在准备重建索引…");
     try {
       try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 重建索引同步分类失败:", e); }
-      const n = await simpleRebuildAssets();
+      const n = await simpleRebuildAssets((p, t) => setSyncProgress(p, t));
       reclassifyItems();
       renderAll();
       jumpToCategoryWithItems();
+      setSyncProgress(null);
       if (n < 0) toast("重建被并发的同步打断，请稍后重试", true);
       else if (_rebuildFailCats > 0)
         toast("重建完成：共 " + n + " 个素材（有 " + _rebuildFailCats + " 个分类枚举失败，可能缺失）", true);
       else toast("重建完成：共 " + n + " 个素材");
     } catch (e) {
+      setSyncProgress(null);
       toast("重建失败：" + e.message, true);
     } finally {
       rebuildIndex.disabled = false;
