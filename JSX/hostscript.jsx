@@ -20,9 +20,56 @@ var _PSL_INDEX_NAME = ".mu_index.json";
 // 脚本版本号：每次改动 hostscript 后 +1。
 // 面板启动时用它检测 PS 内存里是否还是旧版脚本：ExtendScript 全局在 PS 运行期间
 // 一直保留，旧函数不会自动更新 —— 不重加载新函数就不存在 → 扫描静默失败（只显分类不显素材）
-var PSL_SCRIPT_VERSION = 21;
+var PSL_SCRIPT_VERSION = 22;
 function PSL_Version() {
     return "OK:" + PSL_SCRIPT_VERSION;
+}
+
+// ------------------------------------------------------------
+// 自动更新：落盘更新脚本并静默启动
+// 面板生成 ps1（下载 zip → 校验 → 解压 → 覆盖插件目录 → 写 result.txt），
+// 本函数只负责把 ps1 写到 %TEMP%/MuMuHelper_update/，再用 vbs（隐藏窗口）启动它；
+// 面板随后轮询 PSL_ReadUpdateResult 获取结果。
+// ps1 内容须为 ASCII（面板侧保证）；路径含非 ASCII 时靠 UTF-8 BOM 兜底。
+// ------------------------------------------------------------
+function PSL_ApplyUpdate(ps1Text) {
+    try {
+        var dir = new Folder($.getenv("TEMP") + "/MuMuHelper_update");
+        if (!dir.exists) dir.create();
+        var ps1 = new File(dir.fsName + "/apply_update.ps1");
+        ps1.encoding = "UTF-8";
+        ps1.open("w");
+        ps1.write("\uFEFF" + ps1Text);   // BOM：PS 5.1 才能按 UTF-8 读，避免路径中文乱码
+        ps1.close();
+        var vbs = new File(dir.fsName + "/launch_update.vbs");
+        vbs.encoding = "UTF-8";
+        vbs.open("w");
+        // vbs 全 ASCII；用 FSO 取自身所在目录拼 ps1 路径，不硬编码 TEMP
+        vbs.write('Set sh = CreateObject("WScript.Shell")\n' +
+                  'sh.Run "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"\"" & ' +
+                  'CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName) & ' +
+                  '"\\apply_update.ps1\"\"", 0, False\n');
+        vbs.close();
+        vbs.execute();
+        return "OK";
+    } catch (e) {
+        return "ERR:" + e.message;
+    }
+}
+
+// 读取更新结果：OK:PENDING（还没完成）/ OK:OK / OK:ERR:<阶段码>
+function PSL_ReadUpdateResult() {
+    try {
+        var f = new File($.getenv("TEMP") + "/MuMuHelper_update/result.txt");
+        if (!f.exists) return "OK:PENDING";
+        f.encoding = "UTF-8";
+        f.open("r");
+        var t = f.read();
+        f.close();
+        return "OK:" + (t || "").replace(/[\r\n]+$/, "");
+    } catch (e) {
+        return "ERR:" + e.message;
+    }
 }
 
 // ------------------------------------------------------------
