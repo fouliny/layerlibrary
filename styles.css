@@ -752,6 +752,7 @@ input, textarea {
 }
 .path-row { display: flex; gap: 6px; }
 .path-row input { flex: 1; min-width: 0; }
+.path-row .btn-primary { flex: 1; }   /* 按钮独占一行的场景（检查素材/重建索引）均分宽度 */
 
 /* 远程路径素材库：检查状态提示 */
 .remote-status {
