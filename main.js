@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = 23;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = 24;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = 0;             // 检测到的 hostscript 实际版本（设置面板展示）
   async function _loadHostJsx() {
     try {
@@ -3010,9 +3010,8 @@
       updateCheck.disabled = true;
       updateCheck.textContent = "检查中…";
       try {
-        // GitHub API 支持 CORS，CEP 的 fetch 可直接查询（20s 超时由 fetchTimeout 兜底）
-        const ctrl = new AbortController();
-        const resp = await fetchTimeout("https://api.github.com/repos/fouliny/layerlibrary/releases/latest", ctrl);
+        // GitHub API 支持 CORS，CEP 的 fetch 可直接查询（fetchRemote 内部 20s 超时兜底）
+        const resp = await fetchRemote("https://api.github.com/repos/fouliny/layerlibrary/releases/latest");
         if (!resp.ok) throw new Error("查询失败（HTTP " + resp.status + "）");
         const data = await resp.json();
         const tag = String(data.tag_name || "");
