@@ -1,42 +1,67 @@
-# MuMu助手(MuMuHelper)— Photoshop 素材管理面板插件
+# MuMu助手 (MuMuHelper) — Photoshop 素材管理面板插件
 
-CEP 架构:前端(main.js / index.html / styles.css)运行在 CEF 渲染进程,ExtendScript(JSX/hostscript.jsx)运行在 Photoshop 主进程,两者通过 `evalScript` 桥接通信。磁盘文件是唯一真相,面板数据是缓存。
+一款运行在 Adobe Photoshop 里的素材管理面板插件。把磁盘文件夹当作素材库,分类即文件夹、素材即文件,支持本地秒开浏览、远程素材库同步、一键插入素材到当前文档。
 
-## 文件说明
+## 功能
 
-### 运行时必需(部署/打包必须包含)
-
-| 文件/目录 | 作用 |
-|---|---|
-| `CSXS/manifest.xml` | CEP 扩展清单:扩展 ID、PS 版本范围(`[16.0,99.9]`)、入口 `index.html`、CEF 启动参数(`--enable-nodejs`、`--disable-web-security`、`--allow-file-access` 等,用于跨域访问远程素材)。改 ID/入口/参数都在这。 |
-| `index.html` | 面板界面骨架:工具栏、分类下拉、素材网格、设置弹窗、输入弹窗、确认弹窗等全部 DOM。 |
-| `styles.css` | 全部样式:深色主题 CSS 变量、卡片网格、悬停显隐(星星/三点菜单)、520px 响应式断点、弹窗样式。 |
-| `main.js` | 前端核心逻辑(约 3000 行):启动流程、素材扫描调度(秒开缓存渲染 + 分片增量扫描)、分类管理(增删改/排序/拖拽)、加星置顶、手动排序、远程同步(SMB/HTTP 双通道)、设置持久化(localStorage)、脚本版本检测与自动重载。 |
-| `JSX/hostscript.jsx` | ExtendScript(ES3,运行在 PS 主线程):所有磁盘与 PS 操作——扫描素材、保存图层、插入素材、缩略图配对、回收站、远程 SMB 同步复制、base64 分片写盘。版本号 `PSL_SCRIPT_VERSION` 须与 main.js 的 `REQUIRED_SCRIPT_VERSION` 同步(当前 v18),面板启动时据此检测并重载旧脚本。 |
-| `images/IconDark.png` | 面板图标(深色界面用)。 |
-| `images/IconLight.png` | 面板图标(浅色界面用)。 |
-
-### 部署/维护辅助
-
-| 文件 | 作用 |
-|---|---|
-| `一键部署MuMu助手.bat` | 一键部署:双击后自动把整个插件文件夹复制到 `%APPDATA%\Adobe\CEP\extensions\com.pslib.layerlibrary`,并写注册表 `CSXS.9~13 PlayerDebugMode=1`(PS 2020~2026 未签名扩展加载)。内容为纯英文,免疫任何编辑器编码损坏。 |
-
-### 本次整理已删除
-
-| 文件 | 说明 |
-|---|---|
-| `.debug` | CEP 调试端口配置(仅开发调试用,日常运行不需要)。 |
-| `mimetype` | ZXP 签名打包(`application/vnd.adobe.air-ucf-package+zip`)专用文件,本地 bat 部署不需要。 |
-| `TESTING.md` | 旧版测试记录,已被本文档替代。 |
-| `enable_unsigned_extensions.reg` | 手动导入的注册表文件,功能已被部署 bat 完全覆盖(双击 bat 即可),删除避免冗余。 |
+- **素材库管理**:可配置多个素材库,磁盘即真相——磁盘上有什么,面板就显示什么,自动扫描同步
+- **秒开体验**:本地索引缓存(`.mu_index.json`),打开面板即渲染,后台增量扫描保持一致性
+- **分类管理**:新建 / 重命名 / 删除分类,拖拽排序,自动在素材库中创建对应分类文件夹
+- **素材操作**:
+  - 保存素材:把当前选中图层(支持多选合并)一键保存为素材
+  - 插入素材:插入到当前文档(智能对象 / 普通图层,不栅格化),支持多选图层整组还原
+  - 重命名、删除(进回收站)
+- **缩略图**:自动配对预览图(前缀匹配),PSD 缩略图按配对关系自动排除
+- **加星置顶 + 手动排序**
+- **远程素材库同步**:SMB 网络共享 / HTTP 服务器双通道,一键同步,完成后自动重建索引并立即显示,支持断点式增量复制
+- **支持 Photoshop 2020 ~ 2026**(CSXS.9 ~ CSXS.13)
 
 ## 部署方法
 
-1. 双击 `一键部署MuMu助手.bat`(或手动把整个文件夹拷到 `%APPDATA%\Adobe\CEP\extensions\com.pslib.layerlibrary`)
-2. 重启 Photoshop
-3. 菜单:窗口 → 扩展 → MuMu助手
+### 方式一:自动部署(推荐)
 
-## 版本
+1. 下载最新发布包 `MuMuHelper-vXX.zip`(见 Releases / releases 目录),解压到任意位置
+2. 双击解压目录中的 **`一键部署MuMu助手.bat`**,脚本自动完成:
+   - 将插件全部文件复制到 `%APPDATA%\Adobe\CEP\extensions\com.pslib.layerlibrary`
+   - 写入注册表 `CSXS.9 ~ CSXS.13` 的 `PlayerDebugMode=1`,启用未签名扩展加载
+3. 重启 Photoshop
+4. 菜单:窗口 → 扩展 → **MuMu助手**
+5. 打开面板设置,底部显示「MuMu助手 vXX · 已连接 PS(脚本 vXX)」即部署成功
 
-当前脚本版本 **v18**(`hostscript.jsx` 与 `main.js` 两侧版本号一致)。打开设置面板,底部显示「MuMu助手 v18 · 已连接 PS(脚本 v18)」即部署成功。
+### 方式二:手动部署
+
+1. 下载发布包解压(或克隆本仓库),得到 `com.pslib.layerlibrary` 文件夹
+2. 手动把整个文件夹复制到 `%APPDATA%\Adobe\CEP\extensions\`
+   - 最终路径:`%APPDATA%\Adobe\CEP\extensions\com.pslib.layerlibrary\`
+3. 启用未签名扩展(二选一):
+   - 注册表编辑器导入以下内容,或手动执行命令(逐个 CSXS 节点,对应 PS 2020 ~ 2026):
+
+     ```
+     reg add "HKEY_CURRENT_USER\Software\Adobe\CSXS.9"  /v PlayerDebugMode /t REG_SZ /d 1 /f
+     reg add "HKEY_CURRENT_USER\Software\Adobe\CSXS.10" /v PlayerDebugMode /t REG_SZ /d 1 /f
+     reg add "HKEY_CURRENT_USER\Software\Adobe\CSXS.11" /v PlayerDebugMode /t REG_SZ /d 1 /f
+     reg add "HKEY_CURRENT_USER\Software\Adobe\CSXS.12" /v PlayerDebugMode /t REG_SZ /d 1 /f
+     reg add "HKEY_CURRENT_USER\Software\Adobe\CSXS.13" /v PlayerDebugMode /t REG_SZ /d 1 /f
+     ```
+4. 重启 Photoshop,菜单:窗口 → 扩展 → **MuMu助手**
+
+## 开发者
+
+- **打包发布包**:双击 `build-release.bat`,自动读取 `hostscript.jsx` 中的版本号,生成 `releases\MuMuHelper-vXX.zip`(只含运行时文件与部署脚本)
+- **修改代码后**:重新运行部署(方式一)即可生效;脚本版本号升级后,插件启动时会自动清空旧索引并全量重建,保证磁盘素材全部入库
+- 架构:CEP 双层——前端 `main.js`(CEF 渲染)+ `JSX/hostscript.jsx`(ExtendScript,运行在 PS 主线程),通过 `evalScript` 桥接;素材库根目录的 `.mu_index.json` 为本地索引缓存(磁盘为唯一真相)
+
+## 仓库结构
+
+```
+com.pslib.layerlibrary/
+├── CSXS/manifest.xml        CEP 扩展清单(入口、CEF 参数、PS 版本范围)
+├── JSX/hostscript.jsx       ExtendScript 主脚本(PS 主线程,含版本号)
+├── images/                  面板图标(明暗两套)
+├── index.html               面板界面骨架
+├── main.js                  前端核心逻辑(扫描、分类、同步、设置)
+├── styles.css               样式
+├── 一键部署MuMu助手.bat     自动部署脚本
+├── build-release.bat        发布包打包脚本
+└── releases/                发布包输出目录
+```
