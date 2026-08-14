@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = 22;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = 23;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = 0;             // 检测到的 hostscript 实际版本（设置面板展示）
   async function _loadHostJsx() {
     try {
@@ -3025,7 +3025,15 @@
         toast("发现新版本 v" + latest + "，正在后台下载更新…");
         await applyUpdate(tag);
       } catch (e) {
-        toast("检查更新失败：" + e.message, true);
+        const msg = String((e && e.message) || e || "");
+        if (e && e.name === "AbortError") {
+          toast("访问 GitHub 超时，请检查网络/代理后重试", true);
+        } else if (/failed to fetch|networkerror|load failed|net::|dns|resolve/i.test(msg)) {
+          // 网络不可达：给用户看得懂的中文提示，而不是原始的英文 fetch 错误
+          toast("无法访问 GitHub（网络不可达或需开启代理/VPN），请检查网络后重试", true);
+        } else {
+          toast("检查更新失败：" + msg, true);
+        }
       } finally {
         _updating = false;
         updateCheck.disabled = false;
