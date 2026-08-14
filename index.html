@@ -241,6 +241,8 @@
         <label>远程路径素材库</label>
         <div class="path-row">
           <input type="text" id="setRemote" spellcheck="false" placeholder="smb://服务器/共享/素材库 或 http://服务器/素材库" />
+        </div>
+        <div class="path-row" style="margin-top:6px;">
           <button class="btn-primary" id="remoteCheck" type="button" title="手动检查远程素材，有更新就同步到本地">检查素材</button>
           <button class="btn-primary" id="rebuildIndex" type="button" title="以磁盘文件夹为准强制重建全部素材索引，磁盘有但面板不显示时点它">重建索引</button>
         </div>
@@ -267,9 +269,11 @@
         <button class="btn-primary sm" id="setOk" type="button">保存</button>
       </div>
 
-      <div class="hint" style="margin-top:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
-        <span id="verText">MuMu助手</span>
-        <button class="btn-primary sm" id="updateCheck" type="button" title="检查 GitHub 上是否有新版本，发现后静默下载并覆盖更新">检查更新</button>
+      <div class="hint" style="margin-top:6px;">
+        <div id="verText">MuMu助手</div>
+        <div style="margin-top:6px;">
+          <button class="btn-primary sm" id="updateCheck" type="button" title="检查 GitHub 上是否有新版本，发现后静默下载并覆盖更新">检查更新</button>
+        </div>
       </div>
       <div id="updateProgress" hidden style="margin-top:8px;">
         <div class="upd-bar"><div class="upd-fill" id="updFill"></div></div>
