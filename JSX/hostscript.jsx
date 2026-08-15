@@ -20,7 +20,7 @@ var _PSL_INDEX_NAME = ".mu_index.json";
 // 脚本版本号：每次改动 hostscript 后 +1。
 // 面板启动时用它检测 PS 内存里是否还是旧版脚本：ExtendScript 全局在 PS 运行期间
 // 一直保留，旧函数不会自动更新 —— 不重加载新函数就不存在 → 扫描静默失败（只显分类不显素材）
-var PSL_SCRIPT_VERSION = "32.1.1";
+var PSL_SCRIPT_VERSION = "32.2.0";
 function PSL_Version() {
     return "OK:" + PSL_SCRIPT_VERSION;
 }
@@ -1467,6 +1467,17 @@ function PSL_CaptureSelected(dir) {
             }
         } catch (eRm) {}
 
+        // 多选素材保存为「组」：全部图层编进一个组再存 PSD，
+        // 插入时整组一次复制，不会逐层闪烁
+        try {
+            var grp = temp.layerSets.add();
+            grp.name = _pslSafeName(displayName) || "MuMu素材";
+            // 从最底层开始依次移入组内（PLACEATEND），保持原堆叠顺序
+            for (var g = temp.layers.length - 1; g >= 0; g--) {
+                temp.layers[g].move(grp, ElementPlacement.PLACEATEND);
+            }
+        } catch (eGrp) { /* 编组失败退化为散图层保存，插入时动态编组兜底 */ }
+
         // 多层素材角标用组图标
         var kind = "group";
 
@@ -1676,54 +1687,46 @@ function PSL_InsertLayer(p) {
             srcDoc = app.open(f);
             app.activeDocument = srcDoc;   // duplicate 跨文档时源必须是激活文档
 
-            var pick = null;
-            try { pick = srcDoc.layers[0]; } catch (eAL) {}
-            if (!pick) return "ERR:素材文件里没有可用图层";
-
-            // 复制素材里的全部顶层图层（多选合并素材要整组还原），
-            // 自底向上 duplicate 保持原有堆叠顺序
-            var inserted = [];
-            var nLay = srcDoc.layers.length;
-            for (var li = nLay - 1; li >= 0; li--) {
-                try {
-                    var ly = srcDoc.layers[li];
-                    try { if (ly.isBackgroundLayer) continue; } catch (eBg2) {}
-                    var d2 = ly.duplicate(tgt, ElementPlacement.PLACEATBEGINNING);
-                    if (d2) inserted.push(d2);
-                } catch (eDup) { /* 单层复制失败不阻断其余层 */ }
+            // 整组插入：素材 PSD 顶层若已是组（多选保存的素材）直接整组复制；
+            // 多层散图层（旧素材/手工整理的 PSD）先在源文档编成组再整体复制。
+            // 一次 duplicate 完成，避免逐层复制导致画布闪烁多次
+            var tops = [];
+            for (var li = srcDoc.layers.length - 1; li >= 0; li--) {
+                var lyT = srcDoc.layers[li];
+                try { if (lyT.isBackgroundLayer) continue; } catch (eBg2) {}
+                tops.push(lyT);
             }
-            if (inserted.length === 0) return "ERR:素材文件里没有可用图层";
+            if (tops.length === 0) return "ERR:素材文件里没有可用图层";
+
+            var whole = null;   // 复制到目标文档的整体（单图层或整组）
+            if (tops.length > 1) {
+                // 多层散图层：在源文档编成组（组内保持自底向上顺序）再整体复制
+                var grpI = srcDoc.layerSets.add();
+                grpI.name = _pslSafeName(f.name.replace(/\.psd$/i, "")) || "MuMu素材";
+                for (var mi = 0; mi < tops.length; mi++) {
+                    tops[mi].move(grpI, ElementPlacement.PLACEATEND);
+                }
+                whole = grpI;
+            } else {
+                whole = tops[0];
+            }
+
+            var d2 = whole.duplicate(tgt, ElementPlacement.PLACEATBEGINNING);
 
             srcDoc.close(SaveOptions.DONOTSAVECHANGES);
             srcDoc = null;
             app.activeDocument = tgt;
 
-            // 把所有插入图层作为整体居中到画布（保持相互位置不变）；
-            // 调整层等无实际边界的图层不计入包围盒，但跟着一起平移
+            // 插入的整体居中到画布（组内相互位置不变，一次平移完成）
             try {
-                var minX = null, minY = null, maxX = null, maxY = null;
-                for (var bi = 0; bi < inserted.length; bi++) {
-                    try {
-                        var bb = inserted[bi].bounds;
-                        var b0 = bb[0].value, b1 = bb[1].value, b2 = bb[2].value, b3 = bb[3].value;
-                        if (b2 <= b0 || b3 <= b1) continue;   // 无可见边界（调整层等）
-                        if (minX === null || b0 < minX) minX = b0;
-                        if (minY === null || b1 < minY) minY = b1;
-                        if (maxX === null || b2 > maxX) maxX = b2;
-                        if (maxY === null || b3 > maxY) maxY = b3;
-                    } catch (eBB) {}
+                var bb = d2.bounds;
+                var bx0 = bb[0].value, by1 = bb[1].value, bx2 = bb[2].value, by3 = bb[3].value;
+                if (bx2 > bx0 && by3 > by1) {
+                    d2.translate(tgt.width.value / 2 - (bx0 + bx2) / 2,
+                                 tgt.height.value / 2 - (by1 + by3) / 2);
                 }
-                if (minX !== null) {
-                    var dcx = tgt.width.value / 2;
-                    var dcy = tgt.height.value / 2;
-                    var lcx = (minX + maxX) / 2;
-                    var lcy = (minY + maxY) / 2;
-                    for (var ti = 0; ti < inserted.length; ti++) {
-                        try { inserted[ti].translate(dcx - lcx, dcy - lcy); } catch (eTr) {}
-                    }
-                }
-                tgt.activeLayer = inserted[inserted.length - 1];
-            } catch (eCenter) {}
+            } catch (eCen) {}
+            try { tgt.activeLayer = d2; } catch (eAL2) {}
 
             return "OK";
         }

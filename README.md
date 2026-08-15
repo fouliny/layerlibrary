@@ -6,7 +6,7 @@
 
 把散落的素材收进一个「秒开」的素材库 · 一键插入 PS 画布 · 多电脑远程共享 · 自带自动更新
 
-![版本](https://img.shields.io/badge/版本-v32.1.1-2ea44f)
+![版本](https://img.shields.io/badge/版本-v32.2.0-2ea44f)
 ![平台](https://img.shields.io/badge/平台-Windows%20%7C%20macOS-0078d4)
 ![开源](https://img.shields.io/badge/开源-是-green)
 ![更新](https://img.shields.io/badge/更新-2026.08-orange)
@@ -108,6 +108,7 @@
 
 ## 📜 更新历史
 
+- 🆕 **v32.2.0** — 宽面板分类栏拖拽排序、多选保存自动编组、插入整组一次到位不再逐层闪烁
 - 🆕 **v32.1.1** — 版本号改语义化(主.次.修订),比较 / 更新 / 打包 / 发布全链路兼容带点版本
 - 🍎 **v32** — Mac 支持:自动更新 shell 脚本分支、临时目录跨平台、一键部署 `.command`
 - 🔧 **v28 - v31** — 「重建索引」按钮、同步 / 重建进度条、设置面板排版优化、版本区居中
