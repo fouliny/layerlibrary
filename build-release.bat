@@ -9,8 +9,8 @@ echo.
 
 if not exist releases mkdir releases
 
-REM ---- Read script version from hostscript.jsx ----
-for /f %%v in ('powershell -NoProfile -Command "(Select-String -Path 'JSX\hostscript.jsx' -Pattern 'PSL_SCRIPT_VERSION\s*=\s*(\d+)' | Select-Object -First 1).Matches[0].Groups[1].Value"') do set VER=%%v
+REM ---- Read script version from hostscript.jsx (supports 32 / 32.1 / 32.1.1) ----
+for /f %%v in ('powershell -NoProfile -Command "(Select-String -Path 'JSX\hostscript.jsx' -Pattern 'PSL_SCRIPT_VERSION[^0-9]*(\d+(?:\.\d+)*)' | Select-Object -First 1).Matches[0].Groups[1].Value"') do set VER=%%v
 if "%VER%"=="" set VER=0
 echo Version detected: %VER%
 echo.

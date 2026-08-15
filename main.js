@@ -297,8 +297,20 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = 32;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
-  let hostScriptVersion = 0;             // 检测到的 hostscript 实际版本（设置面板展示）
+  const REQUIRED_SCRIPT_VERSION = "32.1.1";   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  let hostScriptVersion = "";                 // 检测到的 hostscript 实际版本（设置面板展示）
+
+  // 语义化版本比较：'32.1.1' > '32.1' > '32'（缺段补 0）；返回 a > b
+  function verGt(a, b) {
+    const pa = String(a || "").match(/(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
+    const pb = String(b || "").match(/(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
+    if (!pa || !pb) return false;
+    for (let i = 1; i <= 3; i++) {
+      const x = parseInt(pa[i] || "0", 10), y = parseInt(pb[i] || "0", 10);
+      if (x !== y) return x > y;
+    }
+    return false;
+  }
   async function _loadHostJsx() {
     try {
       let ext = "";
@@ -315,7 +327,7 @@
   }
   async function _probeScriptVersion() {
     const vRaw = await rawEval("typeof PSL_Version === 'function' ? PSL_Version() : 'OK:0'", 5000);
-    return Number(payload(vRaw)) || 0;
+    return payload(vRaw) || "0";
   }
   async function ensureHost() {
     if (!isCEP) return false;
@@ -328,11 +340,11 @@
       if (r.indexOf("OK:") === 0) {
         // 已加载：检查版本。旧版（PS 内存里残留的老脚本）→ 强制重加载最新 JSX
         const v = await _probeScriptVersion();
-        if (v < REQUIRED_SCRIPT_VERSION) {
+        if (verGt(REQUIRED_SCRIPT_VERSION, v)) {
           console.log("[MuMu助手] hostscript 版本过旧(" + v + "<" + REQUIRED_SCRIPT_VERSION + ")，重新加载最新 JSX");
           await _loadHostJsx();
           const v2 = await _probeScriptVersion();
-          if (v2 >= REQUIRED_SCRIPT_VERSION) { hostScriptVersion = v2; return true; }
+          if (!verGt(REQUIRED_SCRIPT_VERSION, v2)) { hostScriptVersion = v2; return true; }
           // ⚠ 重载后仍是旧版：记日志并继续重试，但绝不提前硬失败返回 false
           //    （返回 false 会让整个扫描链路不跑，两个库全部空白 —— 比旧脚本跑起来更糟）
           staleReloads++;
@@ -2540,7 +2552,7 @@
     const verEl = $("#verText");
     if (verEl) {
       verEl.textContent = "MuMu助手 v" + REQUIRED_SCRIPT_VERSION +
-        (hostScriptVersion > 0
+        (hostScriptVersion
           ? " · 已连接 PS（脚本 v" + hostScriptVersion + "）"
           : " · 未连接 PS（脚本未加载）");
     }
@@ -3256,9 +3268,10 @@
         if (!resp.ok) throw new Error("查询失败（HTTP " + resp.status + "）");
         const data = await resp.json();
         const tag = String(data.tag_name || "");
-        const latest = parseInt(tag.replace(/[^0-9]/g, ""), 10);
-        if (!latest) throw new Error("版本号解析失败（" + tag + "）");
-        if (latest <= REQUIRED_SCRIPT_VERSION) {
+        // 语义化版本：v32.1.1 → "32.1.1"（兼容老格式 v32 → "32"）
+        const latest = String(tag).replace(/^v/i, "");
+        if (!/^\d+(\.\d+){0,2}$/.test(latest)) throw new Error("版本号解析失败（" + tag + "）");
+        if (!verGt(latest, REQUIRED_SCRIPT_VERSION)) {
           toast("已是最新版本 v" + REQUIRED_SCRIPT_VERSION);
           return;
         }
