@@ -46,15 +46,15 @@
 
 <table width="75%" align="center">
 <thead>
-<tr><th align="left">对比项</th><th align="left"><strong>MuMu助手</strong>(本仓库)</th><th align="left">图牛助理(ps6b.com)</th><th align="left">稿定PS设计助理(pszhuli.com)</th></tr>
+<tr><th align="left" nowrap>对比项</th><th align="left"><strong>MuMu助手</strong>(本仓库)</th><th align="left">图牛助理(ps6b.com)</th><th align="left">稿定PS设计助理(pszhuli.com)</th></tr>
 </thead>
 <tbody>
-<tr><td><strong>💰 价格</strong></td><td><strong>免费 · 开源 · 无广告</strong></td><td>免费(约九成功能)</td><td>会员订阅(15 天免费体验)</td></tr>
-<tr><td><strong>📦 素材库</strong></td><td><strong>本地素材库</strong>:分类 / 缩略图 / 秒开索引 / 加星 / 多选合并</td><td>素材库:免扣素材 / 电商模板(云端)</td><td>模板素材:本地复用 + 在线模板库</td></tr>
-<tr><td><strong>🔐 素材归属</strong></td><td><strong>100% 本地,数据完全自控</strong></td><td>云端,依赖厂商服务器</td><td>云端,依赖稿定服务器</td></tr>
-<tr><td><strong>🖥️ 多电脑同步</strong></td><td><strong>SMB / HTTP 自建服务器</strong>,不经第三方</td><td>云端上传分享</td><td>云端同步(团队付费)</td></tr>
-<tr><td><strong>💿 平台</strong></td><td>Windows + macOS</td><td>Windows + macOS</td><td>Windows + macOS(PS 2017+)</td></tr>
-<tr><td><strong>🐙 开源</strong></td><td><strong>是(GitHub 公开源码)</strong></td><td>否</td><td>否</td></tr>
+<tr><td nowrap><strong>💰 价格</strong></td><td><strong>免费 · 开源 · 无广告</strong></td><td>免费(约九成功能)</td><td>会员订阅(15 天免费体验)</td></tr>
+<tr><td nowrap><strong>📦 素材库</strong></td><td><strong>本地素材库</strong>:分类 / 缩略图 / 秒开索引 / 加星 / 多选合并</td><td>素材库:免扣素材 / 电商模板(云端)</td><td>模板素材:本地复用 + 在线模板库</td></tr>
+<tr><td nowrap><strong>🔐 素材归属</strong></td><td><strong>100% 本地,数据完全自控</strong></td><td>云端,依赖厂商服务器</td><td>云端,依赖稿定服务器</td></tr>
+<tr><td nowrap><strong>🖥️ 多电脑同步</strong></td><td><strong>SMB / HTTP 自建服务器</strong>,不经第三方</td><td>云端上传分享</td><td>云端同步(团队付费)</td></tr>
+<tr><td nowrap><strong>💿 平台</strong></td><td>Windows + macOS</td><td>Windows + macOS</td><td>Windows + macOS(PS 2017+)</td></tr>
+<tr><td nowrap><strong>🐙 开源</strong></td><td><strong>是(GitHub 公开源码)</strong></td><td>否</td><td>否</td></tr>
 </tbody>
 </table>
 
