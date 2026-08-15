@@ -886,6 +886,10 @@ input[type="range"]::-webkit-slider-thumb {
   border-radius: var(--radius-sm);
 }
 .side .dd-new { margin-top: 2px; }
+/* 侧栏分类行拖拽排序：拖动源半透明，落点上下边缘高亮指示插入位置 */
+.side .dd-item.dragging { opacity: .4; cursor: grabbing; }
+.side .dd-item.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+.side .dd-item.drop-after  { box-shadow: inset 0 -2px 0 0 var(--accent); }
 
 @media (min-width: 520px) {
   .side { display: flex; }

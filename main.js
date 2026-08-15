@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = "32.1.1";   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = "32.2.0";   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = "";                 // 检测到的 hostscript 实际版本（设置面板展示）
 
   // 语义化版本比较：'32.1.1' > '32.1' > '32'（缺段补 0）；返回 a > b
@@ -868,31 +868,75 @@
         `<span class="dd-count">${count}</span>` + acts;
       bindCatDropTarget(row, c.id);
       catMenuList.appendChild(row);
-      // 侧栏同步一份（结构/交互完全一致）
+      // 侧栏同步一份（结构/交互完全一致）；宽面板下分类行可拖拽排序
+      // （下拉菜单是临时浮层，拖拽体验差，不支持排序）
       if (catSideList) {
         const srow = row.cloneNode(true);
         bindCatDropTarget(srow, c.id);
+        srow.draggable = true;
+        srow.addEventListener("dragstart", (e) => {
+          catDragId = c.id;
+          srow.classList.add("dragging");
+          e.dataTransfer.setData("text/plain", c.id);
+          e.dataTransfer.effectAllowed = "move";
+        });
+        srow.addEventListener("dragend", () => {
+          srow.classList.remove("dragging");
+          catDragId = null;
+          if (catDragHover) {
+            catDragHover.classList.remove("drop-before", "drop-after");
+            catDragHover = null;
+          }
+        });
         catSideList.appendChild(srow);
       }
     });
   }
 
-  // 让分类行成为「拖卡片进来即归类」的落点
+  // 让分类行成为「拖卡片进来即归类」的落点；
+  // 分类自身拖拽（catDragId）时同一行变成排序落点，上下半区决定插入位置
   function bindCatDropTarget(el, catId) {
     el.addEventListener("dragover", (e) => {
-      if (!dragItemId) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      el.classList.add("drop-hover");
+      if (dragItemId) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        el.classList.add("drop-hover");
+        return;
+      }
+      if (catDragId && catDragId !== catId) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        const r = el.getBoundingClientRect();
+        const before = e.clientY < r.top + r.height / 2;
+        if (catDragHover && catDragHover !== el) {
+          catDragHover.classList.remove("drop-before", "drop-after");
+        }
+        catDragHover = el;
+        el.classList.remove("drop-before", "drop-after");
+        el.classList.add(before ? "drop-before" : "drop-after");
+      }
     });
-    el.addEventListener("dragleave", () => el.classList.remove("drop-hover"));
+    el.addEventListener("dragleave", (e) => {
+      if (e.relatedTarget && el.contains(e.relatedTarget)) return;   // 移入子元素不算离开
+      el.classList.remove("drop-hover");
+      if (catDragId) el.classList.remove("drop-before", "drop-after");
+      if (catDragHover === el) catDragHover = null;
+    });
     el.addEventListener("drop", (e) => {
       el.classList.remove("drop-hover");
-      if (!dragItemId) return;
-      e.preventDefault(); e.stopPropagation();
-      dragHandled = true;
-      moveItemToCategory(dragItemId, catId);
-      closeCatMenu();
+      if (catDragId) el.classList.remove("drop-before", "drop-after");
+      if (dragItemId) {
+        e.preventDefault(); e.stopPropagation();
+        dragHandled = true;
+        moveItemToCategory(dragItemId, catId);
+        closeCatMenu();
+        return;
+      }
+      if (catDragId && catDragId !== catId) {
+        e.preventDefault(); e.stopPropagation();
+        const r = el.getBoundingClientRect();
+        reorderCategory(catDragId, catId, e.clientY < r.top + r.height / 2);
+      }
     });
   }
 
@@ -1082,8 +1126,10 @@
     return { items: items, isTrash: isTrash, isWelcome: isWelcome, catById: catById };
   }
 
-  function renderGrid() {
+  function renderGrid(keepScroll) {
     const token = ++_renderToken;
+    // 拖拽重排/置顶等场景传入 keepScroll：渲染完成后恢复滚动位置，避免视野跳到别处
+    const prevScroll = keepScroll ? grid.scrollTop : 0;
     const v = computeSortedView();
     const items = v.items, isTrash = v.isTrash, isWelcome = v.isWelcome, catById = v.catById;
 
@@ -1143,9 +1189,12 @@
       const end = Math.min(i + CHUNK, items.length);
       for (; i < end; i++) frag.appendChild(buildCard(items[i], o));
       grid.appendChild(frag);
-      if (i < items.length) setTimeout(appendChunk, 0);
+      if (i < items.length) { setTimeout(appendChunk, 0); return; }
+      // 全部批次渲染完成后再恢复滚动位置（此时内容高度已定型，位置才准确）
+      if (keepScroll && token === _renderToken) grid.scrollTop = prevScroll;
     };
     if (items.length && !isWelcome) appendChunk();
+    else if (keepScroll) grid.scrollTop = prevScroll;   // 空视图：无卡片可恢复，直接复位
 
     // 动态计算列数：让卡片均分填满宽度，不留右侧空白
     recalcCols();
@@ -1313,7 +1362,7 @@
     item.starred = item.starred ? 0 : 1;
     saveState();
     scheduleIndexWrite();
-    renderGrid();   // 立即重排（置顶立刻生效）
+    renderGrid(true);   // 立即重排（置顶立刻生效）；保持滚动视野
     if (MOCK || !hostReady || !item.file) return;
     try {
       await evalScript("PSL_SetStarred('" + esc(item.file) + "'," + (item.starred ? 1 : 0) + ")");
@@ -1342,12 +1391,29 @@
     }
     saveState();
     scheduleIndexWrite();
-    renderGrid();
+    renderGrid(true);   // 保持滚动位置，重排后视野不跳
+  }
+
+  // 分类拖拽排序（仅宽面板侧栏）：只调整 state.categories 顺序并持久化，
+  // 磁盘文件夹不移动（分类顺序是面板级配置，随库状态一起保存）
+  function reorderCategory(catId, refId, before) {
+    const ci = state.categories.findIndex((x) => x.id === catId);
+    const ri = state.categories.findIndex((x) => x.id === refId);
+    if (ci < 0 || ri < 0 || ci === ri) return;
+    const c = state.categories.splice(ci, 1)[0];
+    let ni = state.categories.findIndex((x) => x.id === refId);
+    if (ni < 0) ni = state.categories.length;
+    if (!before) ni += 1;
+    state.categories.splice(ni, 0, c);
+    saveState();
+    renderDropdown();
   }
 
   // 网格级拖拽排序：卡片拖到另一张卡片上（上下半区）→ 换位置；
   // 拖出面板仍是插入画布（dragend 原逻辑）；搜索/回收站视图不允许手动排序
   let _dropHover = null;   // 当前高亮的插入目标卡片 id
+  let catDragId = null;    // 侧栏分类拖拽中的分类 id（卡片拖拽仍走 dragItemId）
+  let catDragHover = null; // 分类拖拽时当前高亮的插入目标行
   grid.addEventListener("dragover", (e) => {
     if (!dragItemId || searchTerm.trim()) return;
     const c = e.target && e.target.closest ? e.target.closest(".card") : null;
