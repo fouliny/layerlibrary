@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = 31;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = 32;   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = 0;             // 检测到的 hostscript 实际版本（设置面板展示）
   async function _loadHostJsx() {
     try {
@@ -3044,6 +3044,9 @@
        ============================================================ */
     let _updating = false;
   
+    // 平台检测（更新脚本按平台生成：Windows → ps1 + VBS；Mac → sh + nohup）
+    const IS_MAC = /mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent || "");
+  
     // 插件安装目录（与 _loadHostJsx 相同的取法，正斜杠、去尾斜杠）
     function getExtDir() {
       try {
@@ -3122,6 +3125,57 @@
       ].join("\n");
     }
     
+    // 生成 Mac 更新脚本（全 ASCII；/bin/sh 执行，单引号字符串避免转义地狱）
+    // 与 ps1 同构：curl 后台下载 + stat 轮询文件大小算真实百分比 → 解压 → 覆盖 → 写 result.txt
+    // stat -f%z 是 BSD（macOS）语法；本脚本只在 Mac 上运行
+    function buildUpdateSh(tag, extDir) {
+      const safeExt = String(extDir).replace(/'/g, "'\\''");
+      return [
+        "#!/bin/sh",
+        "sleep 1",
+        "D=\"${TMPDIR:-/tmp}/MuMuHelper_update\"",
+        "ZIP=\"$D/update.zip\"",
+        "EX=\"$D/ex\"",
+        "RES=\"$D/result.txt\"",
+        "PRG=\"$D/progress.txt\"",
+        "URL='https://github.com/fouliny/layerlibrary/releases/download/" + tag + "/MuMuHelper-" + tag + ".zip'",
+        "EXT='" + safeExt + "'",
+        "rm -f \"$RES\" \"$PRG\"",
+        "mkdir -p \"$D\"",
+        "err=''",
+        "echo 'STEP:DOWNLOAD 0' > \"$PRG\"",
+        "LEN=$(curl -sIL \"$URL\" | awk 'tolower($1)==\"content-length:\"{n=$2} END{gsub(\"\\r\",\"\",n); print n+0}')",
+        "curl -sL --fail -o \"$ZIP\" \"$URL\" &",
+        "CPID=$!",
+        "while kill -0 $CPID 2>/dev/null; do",
+        "  if [ -f \"$ZIP\" ]; then DONE=$(stat -f%z \"$ZIP\" 2>/dev/null || echo 0); else DONE=0; fi",
+        "  if [ \"$LEN\" -gt 0 ] 2>/dev/null; then",
+        "    PCT=$((DONE*100/LEN))",
+        "    [ \"$PCT\" -gt 100 ] && PCT=100",
+        "    echo \"STEP:DOWNLOAD $PCT\" > \"$PRG\"",
+        "  fi",
+        "  sleep 1",
+        "done",
+        "wait $CPID",
+        "SZ=$(stat -f%z \"$ZIP\" 2>/dev/null || echo 0)",
+        "if [ \"$SZ\" -lt 10000 ]; then err='DOWNLOAD'; fi",
+        "if [ -z \"$err\" ]; then",
+        "  echo 'STEP:EXTRACT' > \"$PRG\"",
+        "  rm -rf \"$EX\"",
+        "  if ! unzip -q \"$ZIP\" -d \"$EX\" 2>/dev/null; then err='EXTRACT'; fi",
+        "  if [ ! -f \"$EX/CSXS/manifest.xml\" ]; then err='EXTRACT'; fi",
+        "fi",
+        "if [ -z \"$err\" ]; then",
+        "  echo 'STEP:INSTALL' > \"$PRG\"",
+        "  if ! cp -R \"$EX\"/. \"$EXT\"/ 2>/dev/null; then err='COPY'; fi",
+        "fi",
+        "if [ -n \"$err\" ]; then echo \"ERR:$err\" > \"$RES\"; else echo 'OK' > \"$RES\"; fi",
+        "rm -f \"$ZIP\"",
+        "rm -rf \"$EX\"",
+        "rm -f \"$PRG\""
+      ].join("\n");
+    }
+    
     // 更新进度条 UI：DOWNLOAD pct → 百分比；EXTRACT/INSTALL → 阶段文字
     function updateProgressUi(s) {
       if (String(s).indexOf("STEP:DOWNLOAD") === 0) {
@@ -3173,7 +3227,8 @@
       updateProgress.hidden = false;
       updFill.style.width = "0%";
       updStepText.textContent = "正在准备更新…";
-      const r = await evalScript("PSL_ApplyUpdate('" + esc(buildUpdatePs1(tag, extDir)) + "')");
+      const script = IS_MAC ? buildUpdateSh(tag, extDir) : buildUpdatePs1(tag, extDir);
+      const r = await evalScript("PSL_ApplyUpdate('" + esc(script) + "')");
       if (String(r).indexOf("ERR:") === 0) {
         updateProgress.hidden = true;
         throw new Error(String(r).slice(4));

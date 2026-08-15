@@ -20,26 +20,38 @@ var _PSL_INDEX_NAME = ".mu_index.json";
 // 脚本版本号：每次改动 hostscript 后 +1。
 // 面板启动时用它检测 PS 内存里是否还是旧版脚本：ExtendScript 全局在 PS 运行期间
 // 一直保留，旧函数不会自动更新 —— 不重加载新函数就不存在 → 扫描静默失败（只显分类不显素材）
-var PSL_SCRIPT_VERSION = 31;
+var PSL_SCRIPT_VERSION = 32;
 function PSL_Version() {
     return "OK:" + PSL_SCRIPT_VERSION;
 }
 
 // ------------------------------------------------------------
-// 自动更新：落盘更新脚本并静默启动
-// 面板生成 ps1（下载 zip → 校验 → 解压 → 覆盖插件目录 → 写 result.txt），
-// 本函数只负责把 ps1 写到 %TEMP%/MuMuHelper_update/，再用 vbs（隐藏窗口）启动它；
+// 自动更新：落盘更新脚本并静默启动（Win / Mac 双平台）
+// 面板按平台生成 ps1（Windows）或 sh（Mac），本函数负责落盘并启动：
+//   Windows：ps1（UTF-8 BOM，防中文路径乱码）+ vbs 隐藏窗口启动
+//   Mac：sh（ASCII）+ system("nohup … &") 后台启动
 // 面板随后轮询 PSL_ReadUpdateResult 获取结果。
-// ps1 内容须为 ASCII（面板侧保证）；路径含非 ASCII 时靠 UTF-8 BOM 兜底。
+// 脚本内容须为 ASCII（面板侧保证）。
 // ------------------------------------------------------------
-function PSL_ApplyUpdate(ps1Text) {
+function PSL_ApplyUpdate(scriptText) {
     try {
-        var dir = new Folder($.getenv("TEMP") + "/MuMuHelper_update");
+        var dir = new Folder(_pslTempDir() + "/MuMuHelper_update");
         if (!dir.exists) dir.create();
+        if (_pslIsMac()) {
+            // Mac：写 shell 脚本，nohup 后台静默执行（system 立即返回，不阻塞面板）
+            var sh = new File(dir.fsName + "/apply_update.sh");
+            sh.encoding = "UTF-8";
+            sh.open("w");
+            sh.write(scriptText);
+            sh.close();
+            var safe = String(dir.fsName + "/apply_update.sh").replace(/'/g, "'\\''");
+            system("nohup sh '" + safe + "' >/dev/null 2>&1 &");
+            return "OK";
+        }
         var ps1 = new File(dir.fsName + "/apply_update.ps1");
         ps1.encoding = "UTF-8";
         ps1.open("w");
-        ps1.write("\uFEFF" + ps1Text);   // BOM：PS 5.1 才能按 UTF-8 读，避免路径中文乱码
+        ps1.write("\uFEFF" + scriptText);   // BOM：PS 5.1 才能按 UTF-8 读，避免路径中文乱码
         ps1.close();
         var vbs = new File(dir.fsName + "/launch_update.vbs");
         vbs.encoding = "UTF-8";
@@ -60,7 +72,7 @@ function PSL_ApplyUpdate(ps1Text) {
 // 读取更新结果：OK:PENDING（还没完成）/ OK:OK / OK:ERR:<阶段码>
 function PSL_ReadUpdateResult() {
     try {
-        var f = new File($.getenv("TEMP") + "/MuMuHelper_update/result.txt");
+        var f = new File(_pslTempDir() + "/MuMuHelper_update/result.txt");
         if (!f.exists) return "OK:PENDING";
         f.encoding = "UTF-8";
         f.open("r");
@@ -75,7 +87,7 @@ function PSL_ReadUpdateResult() {
 // 读取更新进度（面板轮询进度条）：OK:NONE / OK:STEP:DOWNLOAD <pct> / OK:STEP:EXTRACT / OK:STEP:INSTALL
 function PSL_ReadUpdateProgress() {
     try {
-        var f = new File($.getenv("TEMP") + "/MuMuHelper_update/progress.txt");
+        var f = new File(_pslTempDir() + "/MuMuHelper_update/progress.txt");
         if (!f.exists) return "OK:NONE";
         f.encoding = "UTF-8";
         f.open("r");
@@ -90,7 +102,7 @@ function PSL_ReadUpdateProgress() {
 // 更新下载目录（面板在进度条下展示，用户可自行找到安装包）
 function PSL_GetUpdateDir() {
     try {
-        return "OK:" + new Folder($.getenv("TEMP") + "/MuMuHelper_update").fsName;
+        return "OK:" + new Folder(_pslTempDir() + "/MuMuHelper_update").fsName;
     } catch (e) {
         return "ERR:" + e.message;
     }
@@ -102,6 +114,18 @@ function PSL_GetUpdateDir() {
 function _pslNorm(p) {
     if (!p) return "";
     return String(p).replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+// 跨平台临时目录：Mac 上 $.getenv("TEMP") 可能为空（未设置环境变量），回退 Folder.temp
+function _pslTempDir() {
+    var t = $.getenv("TEMP");
+    if (t) return _pslNorm(t);
+    try { return _pslNorm(Folder.temp.fsName); } catch (e) { return "/tmp"; }
+}
+
+// 平台判断：$.os 在 Mac 返回 "Macintosh"（Apple Silicon 带 -arm 后缀），Windows 返回 "Windows"
+function _pslIsMac() {
+    return String($.os || "").toLowerCase().indexOf("mac") >= 0;
 }
 
 function _pslDefaultDir() {
@@ -574,9 +598,7 @@ function _pslCopyFile(srcFs, dstFs) {
 // 同步进度落盘（SMB 同步是单次桥接调用，面板侧用轮询读这个文件显示进度条）
 function _pslWriteSyncProg(text) {
     try {
-        var d = new Folder($.getenv("TEMP"));
-        if (!d.exists) return;
-        var f = new File(d.fsName + "/mumu_sync_progress.txt");
+        var f = new File(_pslTempDir() + "/mumu_sync_progress.txt");
         f.encoding = "UTF-8";
         f.open("w");
         f.writeln(text);
@@ -587,7 +609,7 @@ function _pslWriteSyncProg(text) {
 // 读取同步进度（面板轮询）：OK:NONE / OK:STEP:SCAN / OK:STEP:COPY|curCat|totalCats|分类名 / OK:STEP:DONE
 function PSL_ReadSyncProgress() {
     try {
-        var f = new File($.getenv("TEMP") + "/mumu_sync_progress.txt");
+        var f = new File(_pslTempDir() + "/mumu_sync_progress.txt");
         if (!f.exists) return "OK:NONE";
         f.encoding = "UTF-8";
         f.open("r");
