@@ -1,0 +1,8 @@
+# 构建产物：历史发布包不入仓库（用户直接从 GitHub Releases 下载）
+releases/
+# CEP 调试配置（本机开发用）
+.debug
+# ZXP 打包专用文件
+mimetype
+# 旧测试记录
+TESTING.md
