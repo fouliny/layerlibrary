@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = "32.2.0";   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = "32.2.1";   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = "";                 // 检测到的 hostscript 实际版本（设置面板展示）
 
   // 语义化版本比较：'32.1.1' > '32.1' > '32'（缺段补 0）；返回 a > b
@@ -1407,6 +1407,98 @@
     state.categories.splice(ni, 0, c);
     saveState();
     renderDropdown();
+    scheduleIndexWrite();   // 分类顺序写进磁盘索引（随库走的排序真相）
+  }
+
+  // 相对素材库根目录的 "分类/文件名"（正斜杠），排序按库可移植匹配用
+  function relKeyOf(filePath) {
+    // 取路径最后两段（分类目录/文件名）：Windows(D:\库\分类\a.psd) 与 Mac(/库/分类/a.psd)
+    // 提取出的 key 完全一致，跨平台/换机拷贝后排序也能对上；不依赖根路径前缀
+    const segs = String(filePath || "").replace(/\\/g, "/").split("/").filter(Boolean);
+    if (segs.length < 2) return "";
+    return (segs[segs.length - 2] + "/" + segs[segs.length - 1]).toLowerCase();
+  }
+
+  // 路径是否位于当前素材根目录下（正斜杠+小写比较）：索引里的路径是写索引那台机器的
+  // 绝对路径，换机/跨平台后必然失配 → 这类条目不能补全，交由增量扫描按磁盘真相重建
+  function isUnderRoot(filePath) {
+    const root = String(assetRoot() || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    const p = String(filePath || "").replace(/\\/g, "/");
+    return !!(root && p.toLowerCase().indexOf(root + "/") === 0);
+  }
+
+  // 应用索引 JSON 里的排序：分类顺序（cats）+ 素材手动排序（items[].order，相对路径匹配）。
+  // 索引随库走：U盘拷贝/换机/远程同步后打开，排序与源端一致
+  function applyOrderFromParsed(idx) {
+    if (!idx || !idx.v) return false;
+    let changed = false;
+    // 分类顺序：文件里有的分类按索引顺序前置，索引外的（本地新建）保持原相对位置在后
+    if (Array.isArray(idx.cats) && idx.cats.length) {
+      const byDir = {};
+      state.categories.forEach((c) => { byDir[(c.dir || safeDirName(c.name)).toLowerCase()] = c; });
+      const ordered = [];
+      idx.cats.forEach((d) => {
+        const c = byDir[String(d).toLowerCase()];
+        if (c) { ordered.push(c); delete byDir[String(d).toLowerCase()]; }
+      });
+      if (ordered.length) {
+        const merged = ordered.concat(state.categories.filter((c) => ordered.indexOf(c) < 0));
+        if (merged.length !== state.categories.length ||
+            merged.some((c, i) => c !== state.categories[i])) {
+          state.categories = merged;
+          changed = true;
+        }
+      }
+    }
+    // 素材手动排序：按相对路径恢复 order（索引里没有的新素材保持 createdAt 兜底）
+    if (Array.isArray(idx.items)) {
+      const byRel = {};
+      for (const e of idx.items) {
+        if (!e || !e.file) continue;
+        const rel = relKeyOf(e.file);
+        if (rel && e.order) byRel[rel] = Number(e.order);
+      }
+      for (const it of state.items) {
+        const rel = relKeyOf(it.file);
+        if (!rel) continue;
+        const v = byRel[rel];
+        if (v !== undefined && v > 0 && it.order !== v) {
+          it.order = v;
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  // 读本地磁盘索引并应用排序（本地库/切库/重建后的恢复路径）
+  async function applyOrderFromIndex() {
+    const idx = await readDiskIndex();
+    if (!idx) return;
+    if (applyOrderFromParsed(idx)) saveState();
+  }
+
+  // 按 file 路径合并一组素材条目（远程同步增量更新用）：已有覆盖字段，没有则新增
+  function mergeItems(arr) {
+    let changed = 0;
+    const byId = new Map();
+    for (const it of state.items) byId.set(it.id, it);
+    for (const it of arr) {
+      if (!it || !it.id) continue;
+      const old = byId.get(it.id);
+      if (old) {
+        old.name = it.name; old.thumb = it.thumb; old.kind = it.kind;
+        old.createdAt = it.createdAt; old.size = it.size;
+        old.categoryId = it.categoryId; old.starred = it.starred;
+        if (it.order) old.order = it.order;
+        changed++;
+      } else {
+        state.items.push(it);
+        byId.set(it.id, it);
+        changed++;
+      }
+    }
+    return changed;
   }
 
   // 网格级拖拽排序：卡片拖到另一张卡片上（上下半区）→ 换位置；
@@ -1511,6 +1603,7 @@
     });
     return JSON.stringify({
       v: 1, ts: Date.now(),
+      cats: state.categories.map((c) => c.dir || safeDirName(c.name)),   // 分类顺序（随库走的排序真相）
       items: state.items.map(one),
       trash: state.trash.map(tOne)
     });
@@ -1551,6 +1644,9 @@
     const news = [];
     for (const e of idx.items) {
       if (!e || !e.id || exist.has(e.id)) continue;
+      // 索引路径是写索引机器的绝对路径：换机/跨平台后必然失配，不能补全（否则出现
+      // 点不开的幽灵素材），统一交给增量扫描按磁盘真相重建
+      if (!isUnderRoot(e.file)) continue;
       const catOk = state.categories.some((c) => c.id === e.cat);
       news.push({
         id: e.id, name: e.name || "未命名",
@@ -1566,6 +1662,7 @@
     const tNews = [];
     for (const t of (idx.trash || [])) {
       if (!t || !t.id || tExist.has(t.id)) continue;
+      if (!isUnderRoot(t.file)) continue;   // 同 items：换机/跨平台的旧路径条目不补全
       tNews.push({
         id: t.id, name: t.name || "未命名",
         fromCatId: t.fromCatId, fromCatName: "",
@@ -1593,6 +1690,9 @@
     const items = [];
     for (const e of idx.items) {
       if (!e || !e.id) continue;
+      // 切库后索引里的路径可能来自另一台机器/另一个盘符（如 Windows 写的库拷到 Mac），
+      // 路径已失配 → 不补全，交给切库后的后台增量扫描按磁盘真相重建
+      if (!isUnderRoot(e.file)) continue;
       // ⚠ 切库后分类 id 是重新生成的（c+时间戳），索引里的旧 cat id 必然失配；
       //   直接落 uncat 会把整个库的素材全变“未分类” → 按文件所在文件夹名反查分类
       //   （文件夹已在 syncCategoryFolders 阶段同步成面板分类）
@@ -1622,6 +1722,7 @@
     const trash = [];
     for (const t of (idx.trash || [])) {
       if (!t || !t.id) continue;
+      if (!isUnderRoot(t.file)) continue;   // 同 items：跨机器/盘符的旧路径条目不补全
       trash.push({
         id: t.id, name: t.name || "未命名",
         fromCatId: t.fromCatId, fromCatName: "",
@@ -1975,6 +2076,9 @@
       if (added) toast("已从素材文件夹同步 " + added + " 个分类");
     } catch (e) { /* 列目录失败就跳过反向同步 */ }
 
+    // 排序随库走：磁盘索引里有排序（cats/items[].order）就按其恢复分类顺序
+    try { await applyOrderFromIndex(); } catch (e) { console.warn("[MuMu助手] 应用索引排序失败:", e); }
+
     saveState(); renderAll();
   }
 
@@ -2247,14 +2351,26 @@
       // 3) 应用 diff
       const c1 = applyItemsDelta(d1);
       const c2 = applyTrashDelta(d2);
-      // 4) 标记"全量已扫"——后续切分类无需再按需扫
+      // 4) 跨平台/换机兜底：清掉 file 不在当前素材根目录下的残留条目
+      //    （旧版本在别台机器/盘符写索引后，换环境打开可能补进“幽灵素材”，增量扫描不会删）
+      const g1 = state.items.filter((it) => it.file && !isUnderRoot(it.file));
+      if (g1.length) state.items = state.items.filter((it) => !it.file || isUnderRoot(it.file));
+      const g2 = state.trash.filter((t) => t.file && !isUnderRoot(t.file));
+      if (g2.length) state.trash = state.trash.filter((t) => !t.file || isUnderRoot(t.file));
+      if (g1.length || g2.length) {
+        console.warn("[MuMu助手] 清理跨环境幽灵条目: 素材=" + g1.length + " 回收站=" + g2.length);
+        for (const p of g1.concat(g2)) delete scanIndex[p.id];
+      }
+      // 5) 标记"全量已扫"——后续切分类无需再按需扫
       allScanned = true;
       state.categories.forEach((c) => scannedCats.add(c.id));
-      // 5) 持久化
+      // 排序随库走：新库首次扫描（U盘拷贝/换机）条目刚入库，从磁盘索引恢复排序
+      try { await applyOrderFromIndex(); } catch (e) { console.warn("[MuMu助手] 同步后恢复排序失败:", e); }
+      // 6) 持久化
       saveState();
       saveScanIndex();
-      // 6) 视图：仅在有变化时刷新（轻量）
-      if (c1 + c2 > 0 || opts.forceRender) {
+      // 7) 视图：仅在有变化时刷新（轻量）
+      if (c1 + c2 > 0 || g1.length || g2.length || opts.forceRender) {
         renderAll();
       }
       if (!opts.silent) {
@@ -2442,6 +2558,8 @@
       scannedCats.clear();
       state.categories.forEach((c) => scannedCats.add(c.id));
       _rebuildFailCats = failedCats;
+      // 排序随库走：全量重建会丢失手动排序，从磁盘索引恢复
+      try { await applyOrderFromIndex(); } catch (e) { console.warn("[MuMu助手] 重建后恢复排序失败:", e); }
       saveState();
       saveScanIndex();
       scheduleIndexWrite();   // 重建完成后把磁盘真相固化进索引
@@ -2888,13 +3006,32 @@
       const m = /added=(\d+),updated=(\d+),failed=(\d+)/.exec(res);
       if (!m) throw new Error(res);
       const failedN = Number(m[3]);
-      setSyncProgress(100, "复制完成，正在重建索引…");
-      // 磁盘已变化：先同步分类文件夹，再强制全量重建（磁盘即真相），
-      // 保证「复制完成 → 面板立即显示」，不依赖可能静默失败的增量扫描
+      // 同步返回里附带了实际复制的素材行：面板直接增量合并，无需全量重建（快）
+      const nl = String(res).indexOf("\n");
+      const lines = nl >= 0 ? String(res).slice(nl + 1).split("\n").filter((l) => l.trim()) : [];
+      setSyncProgress(100, "复制完成，正在更新面板…");
+      // 磁盘已变化：先同步分类文件夹（补新分类），再增量合并复制的素材
       try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 同步后同步分类失败:", e); }
-      await rebuildAfterSync((p, t) => setSyncProgress(p, t));
+      if (lines.length) {
+        const its = [];
+        for (const ln of lines) {
+          const it = parseScanLine(ln);
+          if (it) { delete it._fp; its.push(it); }
+        }
+        if (its.length) { mergeItems(its); saveState(); saveScanIndex(); }
+      }
+      // 排序随库走（单向，以远程为准）：读远程 .mu_index.json 的排序应用到本地
+      try {
+        const ris = await evalScript("PSL_ReadIndex('" + esc(remoteRoot) + "')");
+        const rs = payload(ris);
+        if (rs && String(rs).indexOf("ERR:") !== 0) {
+          if (applyOrderFromParsed(JSON.parse(rs))) saveState();
+        }
+      } catch (eR) { /* 远程无索引或读取失败：跳过排序同步 */ }
       reclassifyItems();
+      renderAll();
       jumpToCategoryWithItems();
+      scheduleIndexWrite();
       setSyncProgress(null);
       setRemoteStatus(
         "完成：新增 " + m[1] + " 个，更新 " + m[2] + " 个" +
@@ -2966,6 +3103,8 @@
       // 素材已是最新：仍需把磁盘分类文件夹同步成面板分类，并纠正误标未分类的存量条目
       setSyncProgress(0, "正在同步分类与索引…");
       try { await syncCategoryFolders(true); } catch (e) {}
+      // 排序随库走（单向，以远程为准）：远程索引的排序应用到本地
+      try { if (applyOrderFromParsed(idx)) saveState(); } catch (eO2) {}
       reclassifyItems();
       jumpToCategoryWithItems();
       setSyncProgress(null);
@@ -2977,6 +3116,7 @@
     let added = 0, updated = 0, failed = 0, done = 0;
     const totalBytes = todo.reduce((s, j) => s + (Number(j.it.size) || 0), 0);
     let doneBytes = 0;
+    const newItems = [];   // 成功下载的素材条目（增量合并，免全量重建）
     setRemoteStatus("正在同步 " + todo.length + " 个素材（大文件可能需要一点时间）…");
     for (const j of todo) {
       try {
@@ -2989,12 +3129,13 @@
         await evalScript("PSL_WriteBase64Begin('" + esc(j.localFile) + "')");
         for (const c of chunks) await evalScript("PSL_WriteBase64Chunk('" + c + "')");
         await evalScript("PSL_WriteBase64End()");
+        let thumbPath = "";
         if (j.thumbUrl) {
           try {
             const tb = await (await fetchRemote(j.thumbUrl)).arrayBuffer();
             const tc = bytesToBase64Chunks(tb, 393216);
-            const tPath = pathJoin(pathJoin(settings.assetDir, j.catDir), j.thumbName);
-            await evalScript("PSL_WriteBase64Begin('" + esc(tPath) + "')");
+            thumbPath = pathJoin(pathJoin(settings.assetDir, j.catDir), j.thumbName);
+            await evalScript("PSL_WriteBase64Begin('" + esc(thumbPath) + "')");
             for (const c of tc) await evalScript("PSL_WriteBase64Chunk('" + c + "')");
             await evalScript("PSL_WriteBase64End()");
           } catch (eT) { /* 缩略图失败不影响素材入库 */ }
@@ -3004,34 +3145,41 @@
           esc(j.it.name || "") + "'," + (Number(j.it.createdAt) || 0) + "," + (j.it.star ? 1 : 0) + ")"
         );
         if (Number(sizes[jobs.indexOf(j)]) === 0) added++; else updated++;
+        // 构造条目：下载成功的素材直接进面板，无需全量重建
+        const catRef = state.categories.find((c) =>
+          (c.dir || safeDirName(c.name)).toLowerCase() === j.catDir.toLowerCase()) ||
+          state.categories.find((c) => c.name && c.name.toLowerCase() === j.catDir.toLowerCase());
+        newItems.push({
+          id: j.localFile, file: j.localFile,
+          thumb: thumbPath || undefined,
+          kind: j.it.kind || undefined,
+          name: j.it.name || j.fileName.replace(/\.psd$/i, ""),
+          categoryId: catRef ? catRef.id : "uncat",
+          starred: j.it.star ? 1 : 0,
+          createdAt: Number(j.it.createdAt) || Date.now(),
+          size: Number(j.it.size) || 0,
+          order: Number(j.it.order) || 0   // 远程手动排序（索引里的 order，随库走）
+        });
       } catch (eD) {
         failed++;
         console.error("[MuMu助手] 远程素材下载失败:", j.url, eD);
       }
     }
-    // 磁盘已变化：先同步分类文件夹，再强制全量重建（磁盘即真相），
-    // 保证「下载完成 → 面板立即显示」，不依赖可能静默失败的增量扫描
+    // 磁盘已变化：先同步分类文件夹（补新分类），再增量合并成功下载的素材
     try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 同步后同步分类失败:", e); }
-    setSyncProgress(100, "下载完成，正在重建索引…");
-    await rebuildAfterSync((p, t) => setSyncProgress(p, t));
+    setSyncProgress(100, "下载完成，正在更新面板…");
+    if (newItems.length) { mergeItems(newItems); saveState(); saveScanIndex(); }
+    // 排序随库走（单向，以远程为准）：远程索引的排序应用到本地
+    try { if (applyOrderFromParsed(idx)) saveState(); } catch (eO3) {}
     reclassifyItems();
+    renderAll();
     jumpToCategoryWithItems();
+    scheduleIndexWrite();
     setSyncProgress(null);
     setRemoteStatus(
       "完成：新增 " + added + " 个，更新 " + updated + " 个" + (failed ? "，失败 " + failed + " 个" : ""),
       failed === 0
     );
-  }
-
-  // 同步收尾的强制全量重建：从磁盘枚举重建全部素材（含本次同步的），
-  // 重建后立即渲染 → 同步完成面板必然显示磁盘上的所有素材
-  async function rebuildAfterSync(onProgress) {
-    const n = await simpleRebuildAssets(onProgress);
-    if (n < 0) throw new Error("全量重建被并发的同步打断，请重试");
-    if (_rebuildFailCats > 0)
-      toast("有 " + _rebuildFailCats + " 个分类枚举失败，素材可能缺失，请稍后重试", true);
-    renderAll();
-    return n;
   }
 
   // 同步完成后面板仍停在看不到素材的视图时，自动跳到一个有素材的分类：
