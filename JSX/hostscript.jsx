@@ -20,7 +20,7 @@ var _PSL_INDEX_NAME = ".mu_index.json";
 // 脚本版本号：每次改动 hostscript 后 +1。
 // 面板启动时用它检测 PS 内存里是否还是旧版脚本：ExtendScript 全局在 PS 运行期间
 // 一直保留，旧函数不会自动更新 —— 不重加载新函数就不存在 → 扫描静默失败（只显分类不显素材）
-var PSL_SCRIPT_VERSION = "32.2.1";
+var PSL_SCRIPT_VERSION = "32.2.2";
 function PSL_Version() {
     return "OK:" + PSL_SCRIPT_VERSION;
 }
@@ -621,6 +621,18 @@ function PSL_ReadSyncProgress() {
     }
 }
 
+// ------------------------------------------------------------
+// 相对路径 key：取路径最后两段（分类目录/文件名），跨机器/跨平台一致，
+// 用于远程同步索引对比（Windows D:\库\分类\a.psd 与 Mac /库/分类/a.psd 提取结果相同）
+// ------------------------------------------------------------
+function _pslRelKey(p) {
+    var s = String(p || "").replace(/\\/g, "/");
+    var parts = s.split("/");
+    while (parts.length && !parts[parts.length - 1]) parts.pop();
+    if (parts.length < 2) return "";
+    return (parts[parts.length - 2] + "/" + parts[parts.length - 1]).toLowerCase();
+}
+
 function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
     try {
         var rr = _pslNorm(remoteRoot);
@@ -628,6 +640,43 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
         if (!rem.exists) return "ERR:无法访问远程路径（网络不可达、共享未连接或没有访问权限）";
         var loc = _pslDir(localRoot);
         if (!loc) return "ERR:本地素材根目录不可用";
+        // 提速：先读远程/本地 .mu_index.json 做指纹对比，只复制差异文件（避免全量遍历远程 stat）。
+        // 任意一侧索引缺失/损坏 → 回退全量遍历（老库兼容）。diffMap: relKey -> 1（需要复制）
+        var diffMap = null;
+        try {
+            var rf = new File(rem.fsName + "/" + _PSL_INDEX_NAME);
+            var lf = new File(loc.fsName + "/" + _PSL_INDEX_NAME);
+            if (rf.exists && lf.exists) {
+                rf.encoding = "UTF-8"; rf.open("r"); var rraw = rf.read(); rf.close();
+                lf.encoding = "UTF-8"; lf.open("r"); var lraw = lf.read(); lf.close();
+                if (rraw && lraw) {
+                    var ridx = eval("(" + rraw + ")");
+                    var lidx = eval("(" + lraw + ")");
+                    if (ridx && lidx && ridx.items && lidx.items) {
+                        var lmap = {};
+                        for (var li = 0; li < lidx.items.length; li++) {
+                            var le = lidx.items[li];
+                            if (!le || !le.file) continue;
+                            var lk = _pslRelKey(le.file);
+                            if (lk) lmap[lk] = le;
+                        }
+                        diffMap = {};
+                        for (var ri = 0; ri < ridx.items.length; ri++) {
+                            var re = ridx.items[ri];
+                            if (!re || !re.file) continue;
+                            var rk = _pslRelKey(re.file);
+                            if (!rk) continue;
+                            var le2 = lmap[rk];
+                            if (!le2) { diffMap[rk] = 1; continue; }   // 本地索引没有 → 新增
+                            var same = false;
+                            if (re.fp && le2.fp) same = (String(re.fp) === String(le2.fp));  // 指纹相同 → 跳过
+                            else same = (Number(re.size || 0) === Number(le2.size || 0));     // 旧索引回退大小对比
+                            if (!same) diffMap[rk] = 1;               // 指纹/大小不同 → 更新
+                        }
+                    }
+                }
+            }
+        } catch (eDiff) { diffMap = null; }
         var cats = rem.getFiles();
         // 先统计有效分类文件夹数（进度条按分类粒度显示）
         var totalCats = 0;
@@ -662,6 +711,11 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
                 var low = nm.toLowerCase();
                 if (!_pslIsAssetName(low)) continue;
                 if (_pslIsThumbOfPsd(c.fsName, nm)) continue;   // psd 配套缩略图不是素材
+                // 索引对比快路径：本地已有相同指纹 → 跳过（不再 stat 远程文件）
+                if (diffMap) {
+                    var rk2 = (cname + "/" + nm).toLowerCase();
+                    if (!diffMap[rk2]) continue;
+                }
                 if (!localCat.exists && !_pslMkdirs(localCat)) { failed++; continue; }
                 var dst = new File(localCat.fsName + "/" + f.name);
                 var isNew = !dst.exists;
@@ -1281,6 +1335,8 @@ function PSL_ScanStep(budget) {
             _PSL_Scan = null;
             return "OK:" + outA.join("|") + "||" + outM.join("|") + "||" + outD.join("|") + "||DONE";
         }
+        // 分片进度汇报（面板重建索引时轮询展示：已扫分类/总分类）
+        try { _pslWriteSyncProg("STEP:SCAN|" + S.ci + "|" + S.cats.length); } catch (eP) {}
         return "OK:" + outA.join("|") + "||" + outM.join("|") + "||" + outD.join("|") + "||MORE";
     } catch (e) {
         _PSL_Scan = null;

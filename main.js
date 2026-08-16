@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = "32.2.1";   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = "32.2.2";   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = "";                 // 检测到的 hostscript 实际版本（设置面板展示）
 
   // 语义化版本比较：'32.1.1' > '32.1' > '32'（缺段补 0）；返回 a > b
@@ -1593,13 +1593,15 @@
       id: it.id, file: it.file, thumb: it.thumb, cat: it.categoryId,
       name: it.name, kind: it.kind || "", size: it.size || 0,
       createdAt: it.createdAt || 0, order: it.order || 0,
-      star: it.starred ? 1 : 0
+      star: it.starred ? 1 : 0,
+      fp: scanIndex[it.file] || 0    // 指纹（mtime:size）：远程同步/重建索引对比用，相同即跳过
     });
     const tOne = (t) => ({
       id: t.id, file: t.file, thumb: t.thumb, cat: t.fromCatId,
       name: t.name, kind: t.kind || "", size: t.size || 0,
       createdAt: t.createdAt || 0, deletedAt: t.deletedAt || 0,
-      order: t.order || 0, star: t.starred ? 1 : 0
+      order: t.order || 0, star: t.starred ? 1 : 0,
+      fp: scanIndex[t.file] || 0
     });
     return JSON.stringify({
       v: 1, ts: Date.now(),
@@ -2496,7 +2498,6 @@
     const seq = ++_syncSeq;                 // 作废在途的分片扫描，避免两套通道互踩
     _rebuildRunning = true;                 // 重建进行中：兜底救回跳过，避免 1.5s 后互踩作废本次重建
     let failedCats = 0;
-    const items = [];
     try {
       // 遍历源以磁盘为准：先列素材根目录的真实文件夹（JSX 侧已排除回收站），
       // 不依赖 state.categories —— 否则 syncCategoryFolders 静默失败时，
@@ -2524,47 +2525,62 @@
         }
         if (added) toast("已从素材文件夹同步 " + added + " 个分类");
       }
-      for (const dirName of catList) {
-        if (seq !== _syncSeq) return -1;
-        const catIdx = catList.indexOf(dirName);
-        if (onProgress)
-          onProgress(Math.round((catIdx + 1) / catList.length * 100), "正在重建索引 " + (catIdx + 1) + "/" + catList.length + "：" + dirName);
-        try {
-          // ⚠ 120s 长超时：大库/慢机（PS2024 等）枚举大量文件可能超过默认 15s，
-          //   超时静默丢分类素材 → “磁盘有、面板无”的元凶之一
-          const body = payload(await evalScript(
-            "PSL_ListCatAssets('" + esc(settings.assetDir) + "','" + esc(dirName) + "')",
-            120000
-          ));
+      // 增量重建：分片指纹扫描（与后台同步同通道），指纹相同自动跳过，只处理新增/变化文件，
+      // 远快于全量枚举；scanIndex 缺失/损坏时自然退化为全量（全部判新增）
+      if (onProgress) onProgress(2, "正在增量重建索引（只处理变化文件）…");
+      let c1 = 0, c2 = 0;
+      try {
+        const d1 = await _runSliceScan("assets", seq, serializeScanIndex(scanIndex));
+        if (d1 === null) return -1;
+        const d2 = await _runSliceScan("trash", seq, "__REUSE__");
+        if (d2 === null) return -1;
+        c1 = applyItemsDelta(d1);
+        c2 = applyTrashDelta(d2);
+      } catch (eIncr) {
+        // 回退：分片链路异常（旧脚本残留等）→ 用无状态枚举通道逐分类全量重建（原能力保留）
+        console.warn("[MuMu助手] 增量重建失败，回退全量枚举:", eIncr);
+        const items2 = [];
+        for (const dirName of catList) {
           if (seq !== _syncSeq) return -1;
-          if (body) {
-            for (const ln of String(body).split("|")) {
-              if (!ln) continue;
-              const it = parseScanLine(ln);
-              if (it) {
-                if (it._fp) { scanIndex[it.file] = it._fp; delete it._fp; }
-                items.push(it);
+          if (onProgress)
+            onProgress(Math.round((catList.indexOf(dirName) + 1) / catList.length * 100), "正在重建索引 " + (catList.indexOf(dirName) + 1) + "/" + catList.length + "：" + dirName);
+          try {
+            const body = payload(await evalScript(
+              "PSL_ListCatAssets('" + esc(settings.assetDir) + "','" + esc(dirName) + "')",
+              120000
+            ));
+            if (seq !== _syncSeq) return -1;
+            if (body) {
+              for (const ln of String(body).split("|")) {
+                if (!ln) continue;
+                const it = parseScanLine(ln);
+                if (it) {
+                  if (it._fp) { scanIndex[it.file] = it._fp; delete it._fp; }
+                  items2.push(it);
+                }
               }
             }
+          } catch (e) {
+            console.error("[MuMu助手] 简单枚举分类失败 " + dirName + ":", e);
+            failedCats++;
           }
-        } catch (e) {
-          console.error("[MuMu助手] 简单枚举分类失败 " + dirName + ":", e);
-          failedCats++;
         }
+        if (seq !== _syncSeq) return -1;
+        state.items = items2;                // 磁盘即真相：整体替换，绝不与旧条目合并
+        c1 = items2.length;
       }
       if (seq !== _syncSeq) return -1;
-      state.items = items;                     // 磁盘即真相：整体替换，绝不与旧条目合并
       allScanned = true;
       scannedCats.clear();
       state.categories.forEach((c) => scannedCats.add(c.id));
       _rebuildFailCats = failedCats;
-      // 排序随库走：全量重建会丢失手动排序，从磁盘索引恢复
+      // 排序随库走：重建会丢失手动排序，从磁盘索引恢复
       try { await applyOrderFromIndex(); } catch (e) { console.warn("[MuMu助手] 重建后恢复排序失败:", e); }
       saveState();
       saveScanIndex();
       scheduleIndexWrite();   // 重建完成后把磁盘真相固化进索引
-      console.log("[MuMu助手] 简单枚举重建完成: 素材=" + items.length + (failedCats ? " 失败分类=" + failedCats : ""));
-      return items.length;
+      console.log("[MuMu助手] 重建完成: 素材=" + state.items.length + " Δ=" + (c1 + c2) + (failedCats ? " 失败分类=" + failedCats : ""));
+      return state.items.length;
     } finally {
       _rebuildRunning = false;
     }
@@ -2922,7 +2938,12 @@
         if (!m) return;
         const parts = String(m[1]).split("|");
         if (parts[0] === "STEP:SCAN") {
-          setSyncProgress(0, "正在对比远程素材…");
+          const cur = Number(parts[1]), tot = Number(parts[2]);
+          if (tot > 0 && cur >= 0) {
+            setSyncProgress(Math.min(99, Math.round(cur / tot * 100)), "正在扫描素材 " + cur + "/" + tot + " 个分类");
+          } else {
+            setSyncProgress(0, "正在对比远程素材…");
+          }
         } else if (parts[0] === "STEP:COPY") {
           const cur = Number(parts[1]) || 0, tot = Number(parts[2]) || 1;
           const pct = Math.round(cur / tot * 100);
@@ -3239,9 +3260,11 @@
     rebuildIndex.textContent = "重建中…";
     remoteCheck.disabled = true;
     setSyncProgress(0, "正在准备重建索引…");
+    startSyncPoll();   // 增量扫描分片进度走轮询（STEP:SCAN|已扫分类|总分类）
     try {
       try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 重建索引同步分类失败:", e); }
       const n = await simpleRebuildAssets((p, t) => setSyncProgress(p, t));
+      stopSyncPoll();
       reclassifyItems();
       renderAll();
       jumpToCategoryWithItems();
@@ -3249,11 +3272,13 @@
       if (n < 0) toast("重建被并发的同步打断，请稍后重试", true);
       else if (_rebuildFailCats > 0)
         toast("重建完成：共 " + n + " 个素材（有 " + _rebuildFailCats + " 个分类枚举失败，可能缺失）", true);
-      else toast("重建完成：共 " + n + " 个素材");
+      else toast("重建完成：共 " + n + " 个素材（增量扫描）");
     } catch (e) {
+      stopSyncPoll();
       setSyncProgress(null);
       toast("重建失败：" + e.message, true);
     } finally {
+      stopSyncPoll();
       rebuildIndex.disabled = false;
       rebuildIndex.textContent = "重建索引";
       remoteCheck.disabled = false;
