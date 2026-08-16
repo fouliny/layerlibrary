@@ -20,7 +20,7 @@ var _PSL_INDEX_NAME = ".mu_index.json";
 // 脚本版本号：每次改动 hostscript 后 +1。
 // 面板启动时用它检测 PS 内存里是否还是旧版脚本：ExtendScript 全局在 PS 运行期间
 // 一直保留，旧函数不会自动更新 —— 不重加载新函数就不存在 → 扫描静默失败（只显分类不显素材）
-var PSL_SCRIPT_VERSION = "32.2.0";
+var PSL_SCRIPT_VERSION = "32.2.1";
 function PSL_Version() {
     return "OK:" + PSL_SCRIPT_VERSION;
 }
@@ -581,7 +581,7 @@ function _pslCopyFile(srcFs, dstFs) {
         var dst = new File(dstFs);
         if (!dst.open("w")) { src.close(); return false; }
         dst.encoding = "BINARY";
-        var chunk = 1048576;
+        var chunk = 8388608;
         while (!src.eof) {
             var s = src.read(chunk);
             if (!s || s.length === 0) break;
@@ -641,6 +641,7 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
             totalCats++;
         }
         var added = 0, updated = 0, failed = 0, curCat = 0;
+        var changedLines = [];   // 实际复制的素材行（面板据此增量更新，免全量重建）
         _pslWriteSyncProg("STEP:SCAN");
         for (var i = 0; i < cats.length; i++) {
             var c = cats[i];
@@ -693,10 +694,19 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
                     } catch (eT3) {}
                 }
                 if (isNew) added++; else updated++;
+                // 构造增量条目行（与扫描行同格式）：面板直接解析入列，无需全量重建
+                var meta2 = _pslReadMeta(localCat.fsName, base0);
+                var thumbN = "";
+                var tf = _pslFindThumb(localCat.fsName, base0);
+                if (tf) thumbN = _pslNorm(tf.fsName);
+                changedLines.push(cname + ":::" + _pslNorm(dst.fsName) + ":::" + thumbN + ":::" +
+                                 meta2.kind + ":::" + meta2.name + ":::" + meta2.createdAt + ":::" +
+                                 (dst.length || 0) + ":::" + _pslFp(dst) + ":::" + meta2.star);
             }
         }
         _pslWriteSyncProg("STEP:DONE");
-        return "OK:added=" + added + ",updated=" + updated + ",failed=" + failed;
+        return "OK:added=" + added + ",updated=" + updated + ",failed=" + failed +
+               (changedLines.length ? "\n" + changedLines.join("\n") : "");
     } catch (e) {
         try { _pslWriteSyncProg("STEP:DONE"); } catch (eW) {}
         return "ERR:" + e.message;
