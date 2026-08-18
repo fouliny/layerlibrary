@@ -85,6 +85,12 @@ input, textarea {
   border-bottom: 1px solid var(--border);
 }
 
+/* 搜索框 + 设置齿轮：同组排列，窄面板下整体换行到第二行 */
+.search-row {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+}
+
 /* 分类下拉 */
 .dropdown { position: relative; flex: 0 0 auto; }
 .dd-trigger {
@@ -142,7 +148,7 @@ input, textarea {
   color: var(--text-dim); cursor: pointer;
   border-radius: var(--radius-sm);
   font-size: 12px; line-height: 1;
-  display: grid; place-items: center;
+  display: inline-flex; align-items: center; justify-content: center;
 }
 .dd-act:hover { background: var(--border); color: var(--text); }
 .dd-act[data-act="del"]:hover { color: var(--danger); }
@@ -240,11 +246,17 @@ input, textarea {
 .card:active { transform: scale(0.98); }
 .card.dragging { opacity: .4; cursor: grabbing; }
 
-/* 缩略图外层容器：高度由卡片内联样式控制（设置里可调），
-   ⚠ 不能写 min/max-height 定死 120px，否则内联高度会被钳制，
-   调整缩略图大小实际不生效 */
+/* 卡片整体保持正方形：::before 用 padding-top:100% 撑起等于卡片宽度的高度，
+   缩略图与名称条都绝对定位填进这个正方形内（旧版 Chromium 无 aspect-ratio 也能生效） */
+.card::before {
+  content: "";
+  display: block;
+  padding-top: 100%;
+}
+
+/* 缩略图外层容器：绝对定位填满整张正方形卡片，缩略图大小跟随滑块（卡片边长） */
 .thumb-wrap {
-  width: 100%; height: 120px;
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0;
   overflow: hidden;
   background-color: var(--thumb-bg);
   background-image:
@@ -264,13 +276,21 @@ input, textarea {
   width: auto; height: auto;
   display: block;
 }
-.card-meta { padding: 6px 7px 8px; }
+/* 素材名：半透明渐变条覆盖在缩略图底部，卡片因此保持正方形、不再拉长 */
+.card-meta {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  padding: 14px 6px 5px;
+  background: linear-gradient(to top, rgba(0,0,0,.78), rgba(0,0,0,0));
+  z-index: 3;
+}
 .card-name {
-  font-size: 11.5px; font-weight: 600; color: var(--text);
+  font-size: 11px; font-weight: 600; color: #fff;
+  line-height: 1.35;
+  text-shadow: 0 1px 2px rgba(0,0,0,.5);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .card-cat {
-  font-size: 10px; color: var(--text-dim); margin-top: 2px;
+  font-size: 10px; color: rgba(255,255,255,.72); margin-top: 2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
@@ -280,7 +300,8 @@ input, textarea {
   border: none; background: rgba(20,20,20,0.6);
   color: #fff; cursor: pointer;
   border-radius: var(--radius-sm);
-  display: grid; place-items: center;
+  display: inline-flex; align-items: center; justify-content: center;
+  z-index: 2;   /* 缩略图已是绝对定位覆盖层，按钮必须显式置顶才不被盖住 */
   opacity: 0; transform: translateY(-2px);
   transition: opacity .15s, transform .15s, background .15s;
 }
@@ -295,7 +316,7 @@ input, textarea {
   border: none; background: rgba(20,20,20,0.6);
   color: #8a8f9c; cursor: pointer;
   border-radius: var(--radius-sm);
-  display: grid; place-items: center;
+  display: inline-flex; align-items: center; justify-content: center;
   z-index: 2;
   opacity: 0; transform: translateY(-2px);
   transition: color .15s, background .15s, transform .15s, opacity .15s;
@@ -314,7 +335,7 @@ input, textarea {
 .card-badge {
   position: absolute; top: 4px; left: 4px;
   min-width: 18px; height: 18px; padding: 0 5px;
-  display: grid; place-items: center;
+  display: inline-flex; align-items: center; justify-content: center;
   font-size: 11px; font-weight: 800; line-height: 1;
   color: #fff; border-radius: var(--radius-sm);
   background: var(--text-dim); z-index: 2;
@@ -334,11 +355,11 @@ input, textarea {
 .card-missing .card-name { text-decoration: line-through; }
 .card-missing-ov {
   position: absolute; top: 0; right: 0; bottom: 0; left: 0;
-  display: grid; place-items: center;
+  display: inline-flex; align-items: center; justify-content: center;
   font-size: 11px; font-weight: 700; color: #ffb4b4;
   background: rgba(40,10,10,.45);
   border-radius: var(--radius-sm);
-  text-align: center; padding: 4px; z-index: 2;
+  text-align: center; padding: 4px; z-index: 4;
   pointer-events: none;
 }
 
@@ -351,7 +372,7 @@ input, textarea {
 .card-restore {
   position: absolute; top: 4px; left: 4px;
   height: 18px; padding: 0 6px;
-  display: grid; place-items: center;
+  display: inline-flex; align-items: center; justify-content: center;
   font-size: 10.5px; font-weight: 700; line-height: 1;
   color: #fff; border: none; border-radius: var(--radius-sm);
   background: var(--accent); z-index: 3; cursor: pointer;
@@ -619,7 +640,7 @@ input, textarea {
 .btn-ico {
   flex: 0 0 auto;
   width: 28px; height: 28px;
-  display: grid; place-items: center;
+  display: inline-flex; align-items: center; justify-content: center;
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -691,7 +712,7 @@ input, textarea {
 .sort-dir {
   flex: 0 0 auto;
   width: 22px; height: 22px;
-  display: grid; place-items: center;
+  display: inline-flex; align-items: center; justify-content: center;
   background: transparent;
   border: 0;
   border-radius: calc(var(--radius) - 2px);
@@ -856,9 +877,12 @@ input[type="range"]::-webkit-slider-thumb {
    ============================================================ */
 @media (max-width: 360px) {
   .toolbar { flex-wrap: wrap; }
-  /* 搜索框换到第二行独占一整行，第一行只留下拉/排序/设置 */
-  .toolbar .search { order: 99; flex: 1 1 100%; min-width: 0; }
-  .no-flex-gap .toolbar .search { margin-left: 0; margin-top: 8px; }
+  /* 第一行两端对齐：分类下拉靠左、排序靠右，右边缘与第二行搜索行的齿轮对齐 */
+  .toolbar .dropdown { margin-right: auto; }
+  /* 搜索框 + 设置齿轮整体换到第二行，第一行只留下拉/排序 */
+  .search-row { order: 99; flex: 1 1 100%; min-width: 0; }
+  .no-flex-gap .toolbar .search-row { margin-left: 0; margin-top: 8px; }
+  .no-flex-gap .search-row > * + * { margin-left: 8px; }
 }
 
 @media (max-width: 330px) {

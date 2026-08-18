@@ -20,7 +20,7 @@ var _PSL_INDEX_NAME = ".mu_index.json";
 // 脚本版本号：每次改动 hostscript 后 +1。
 // 面板启动时用它检测 PS 内存里是否还是旧版脚本：ExtendScript 全局在 PS 运行期间
 // 一直保留，旧函数不会自动更新 —— 不重加载新函数就不存在 → 扫描静默失败（只显分类不显素材）
-var PSL_SCRIPT_VERSION = "32.2.2";
+var PSL_SCRIPT_VERSION = "32.2.6";
 function PSL_Version() {
     return "OK:" + PSL_SCRIPT_VERSION;
 }
@@ -357,6 +357,26 @@ function PSL_RemoveCatDir(root, name) {
     }
 }
 
+// 把本地分类文件夹整体移入回收站（远程同步删除对齐用：远程已改名/删除的分类本地不再保留）
+// 移动而非物理删除，素材可从回收站找回；回收站已有同名文件夹时加时间戳后缀避免覆盖
+function PSL_TrashCatDir(root, name) {
+    try {
+        var r = _pslDir(root);
+        if (!r) return "ERR:素材根目录不可用";
+        var dn = _pslSafeDir(name);
+        var f = new Folder(r.fsName + "/" + dn);
+        if (!f.exists) return "OK:GONE";
+        var trash = new Folder(r.fsName + "/" + _PSL_TRASH);
+        if (!trash.exists && !_pslMkdirs(trash)) return "ERR:无法创建回收站文件夹";
+        var target = new Folder(trash.fsName + "/" + dn);
+        if (target.exists) target = new Folder(trash.fsName + "/" + dn + "_" + (new Date()).getTime());
+        if (!f.move(target)) return "ERR:移动失败（文件可能被占用）";
+        return "OK:1";
+    } catch (e) {
+        return "ERR:" + e.message;
+    }
+}
+
 // 列出素材根目录下的所有子文件夹，用 | 分隔（面板据此把磁盘上手动建的文件夹同步成分类）
 // 回收站是保留文件夹，必须排除，否则会被当成一个普通分类同步进面板
 function PSL_ListCatDirs(root) {
@@ -595,6 +615,24 @@ function _pslCopyFile(srcFs, dstFs) {
     }
 }
 
+// 远程同步的缩略图覆盖规则：远程缩略图比本地小才覆盖（本地保留较小者）。
+// 目的：远程小图（已压缩 120px）覆盖本地大图；本地已压缩的小图不被远程旧大图覆盖回去。
+// 只处理 psd 配套缩略图；图片素材原图是素材本体，不参与。
+function _pslSyncRemoteThumb(remoteCatFs, localCatFs, base0) {
+    var th = _pslFindThumb(remoteCatFs, base0);
+    if (!th) return false;
+    var thd = new File(localCatFs + "/" + th.name);
+    if (!thd.exists) {
+        var lc = new Folder(localCatFs);
+        if (!lc.exists && !_pslMkdirs(lc)) return false;
+        return _pslCopyFile(th.fsName, thd.fsName);
+    }
+    try {
+        if (th.length < thd.length) return _pslCopyFile(th.fsName, thd.fsName);
+    } catch (e) {}
+    return false;
+}
+
 // 同步进度落盘（SMB 同步是单次桥接调用，面板侧用轮询读这个文件显示进度条）
 function _pslWriteSyncProg(text) {
     try {
@@ -678,8 +716,10 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
             }
         } catch (eDiff) { diffMap = null; }
         var cats = rem.getFiles();
-        // 先统计有效分类文件夹数（进度条按分类粒度显示）
+        // 先统计有效分类文件夹数（进度条按分类粒度显示），同时收集远程分类清单
+        // （面板据此做删除对齐：远程已改名/删除的分类 → 本地对应文件夹移入回收站）
         var totalCats = 0;
+        var remoteCatNames = [];
         for (var t = 0; t < cats.length; t++) {
             var ct = cats[t];
             if (!(ct instanceof Folder)) continue;
@@ -688,6 +728,7 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
             if (ctn.charAt(0) === ".") continue;
             if (ctn === _PSL_TRASH) continue;
             totalCats++;
+            remoteCatNames.push(ctn);
         }
         var added = 0, updated = 0, failed = 0, curCat = 0;
         var changedLines = [];   // 实际复制的素材行（面板据此增量更新，免全量重建）
@@ -701,7 +742,7 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
             if (cname === _PSL_TRASH) continue;
             curCat++;
             _pslWriteSyncProg("STEP:COPY|" + curCat + "|" + totalCats + "|" + cname);
-            var localCat = new Folder(loc.fsName + "/" + c.name);
+            var localCat = new Folder(loc.fsName + "/" + cname);   // 用解码后的分类名，与面板/diffMap 保持一致
             var files = c.getFiles();
             for (var j = 0; j < files.length; j++) {
                 var f = files[j];
@@ -711,6 +752,11 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
                 var low = nm.toLowerCase();
                 if (!_pslIsAssetName(low)) continue;
                 if (_pslIsThumbOfPsd(c.fsName, nm)) continue;   // psd 配套缩略图不是素材
+                var dot0 = nm.lastIndexOf(".");
+                var base0 = dot0 > 0 ? nm.substring(0, dot0) : nm;
+                // 缩略图独立同步（与主文件解耦）：远程缩略图更小才覆盖本地
+                // （远程小图覆盖本地大图；远程大图不碰本地已压缩的小图，避免被旧大图覆盖回去）
+                try { _pslSyncRemoteThumb(c.fsName, localCat.fsName, base0); } catch (eT0) {}
                 // 索引对比快路径：本地已有相同指纹 → 跳过（不再 stat 远程文件）
                 if (diffMap) {
                     var rk2 = (cname + "/" + nm).toLowerCase();
@@ -729,16 +775,6 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
                 if (!needCopy) continue;
                 var ok = _pslCopyFile(f.fsName, dst.fsName);
                 if (!ok) { failed++; continue; }
-                // 配套缩略图（前缀配对，保持远程文件名 → 本地规则 A/B 都能配对）
-                var dot0 = nm.lastIndexOf(".");
-                var base0 = dot0 > 0 ? nm.substring(0, dot0) : nm;
-                var th = _pslFindThumb(c.fsName, base0);
-                if (th) {
-                    try {
-                        var thd = new File(localCat.fsName + "/" + th.name);
-                        _pslCopyFile(th.fsName, thd.fsName);
-                    } catch (eT2) {}
-                }
                 // 配套 meta.json
                 var mf = new File(c.fsName + "/" + base0 + ".meta.json");
                 if (mf.exists) {
@@ -760,6 +796,7 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
         }
         _pslWriteSyncProg("STEP:DONE");
         return "OK:added=" + added + ",updated=" + updated + ",failed=" + failed +
+               (remoteCatNames.length ? "\nCATS:" + remoteCatNames.join("\u0001") : "") +
                (changedLines.length ? "\n" + changedLines.join("\n") : "");
     } catch (e) {
         try { _pslWriteSyncProg("STEP:DONE"); } catch (eW) {}
@@ -767,28 +804,9 @@ function PSL_SyncRemoteSmb(remoteRoot, localRoot) {
     }
 }
 
-// ------------------------------------------------------------
-// 批量获取本地文件大小（不存在返回 0），用于 HTTP 同步时判断是否需要更新
-// spec: "path1|path2|..." → "OK:size1|size2|..."
-// ------------------------------------------------------------
-function PSL_GetSizes(spec) {
-    try {
-        var segs = String(spec || "").split("|");
-        var out = [];
-        for (var i = 0; i < segs.length; i++) {
-            var p = segs[i];
-            if (!p) { out.push("0"); continue; }
-            var f = new File(_pslNorm(p));
-            out.push((f && f.exists) ? String(f.length || 0) : "0");
-        }
-        return "OK:" + out.join("|");
-    } catch (e) {
-        return "ERR:" + e.message;
-    }
-}
 
 // ------------------------------------------------------------
-// 公开写入单个素材的 meta.json（HTTP 同步下载完成后调用）
+// 公开写入单个素材的 meta.json（素材重命名/远程同步收尾时调用）
 // ------------------------------------------------------------
 function PSL_WriteMeta(psdPath, kind, name, createdAt, star) {
     try {
@@ -799,78 +817,6 @@ function PSL_WriteMeta(psdPath, kind, name, createdAt, star) {
     }
 }
 
-// ------------------------------------------------------------
-// Base64 → 二进制文件（分片写入，供 HTTP 同步下载素材用）
-// 流程：PSL_WriteBase64Begin(path) → PSL_WriteBase64Chunk(b64) × N → PSL_WriteBase64End()
-// 分片可避免一次性把超大 base64（几十 MB）塞进 CEP 桥导致卡死
-// 每个素材都重新 Begin，_PSL_B64F 全局只保留当前正在写的文件
-// ------------------------------------------------------------
-var _PSL_B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-function _pslB64Decode(b64) {
-    var s = String(b64 || "");
-    var out = [];
-    var i = 0, len = s.length;
-    var c1, c2, c3, c4, b1, b2, b3;
-    while (i < len) {
-        c1 = _PSL_B64_CHARS.indexOf(s.charAt(i++));
-        c2 = _PSL_B64_CHARS.indexOf(s.charAt(i++));
-        c3 = _PSL_B64_CHARS.indexOf(s.charAt(i++));
-        c4 = _PSL_B64_CHARS.indexOf(s.charAt(i++));
-        if (c1 < 0 || c2 < 0) break;
-        b1 = (c1 << 2) | (c2 >> 4);
-        out.push(b1 & 255);
-        if (c3 >= 0) {
-            b2 = ((c2 & 15) << 4) | (c3 >> 2);
-            out.push(b2 & 255);
-            if (c4 >= 0) {
-                b3 = ((c3 & 3) << 6) | c4;
-                out.push(b3 & 255);
-            }
-        }
-    }
-    return out;
-}
-var _PSL_B64F = null;
-function PSL_WriteBase64Begin(path) {
-    try {
-        if (_PSL_B64F) { try { _PSL_B64F.close(); } catch (eX) {} }
-        var f = new File(_pslNorm(path));
-        var dir = f.parent;
-        if (!dir.exists && !_pslMkdirs(dir)) return "ERR:无法创建目标目录";
-        f.encoding = "BINARY";
-        if (!f.open("w")) return "ERR:无法写入文件（目标可能被占用）";
-        _PSL_B64F = f;
-        return "OK:1";
-    } catch (e) {
-        return "ERR:" + e.message;
-    }
-}
-function PSL_WriteBase64Chunk(b64) {
-    try {
-        if (!_PSL_B64F) return "ERR:未初始化（先调用 PSL_WriteBase64Begin）";
-        var bytes = _pslB64Decode(b64);
-        var sb = [];
-        for (var i = 0; i < bytes.length; i++) {
-            sb.push(String.fromCharCode(bytes[i]));
-            if (sb.length >= 262144) { _PSL_B64F.write(sb.join("")); sb = []; }
-        }
-        if (sb.length) _PSL_B64F.write(sb.join(""));
-        return "OK:" + bytes.length;
-    } catch (e) {
-        return "ERR:" + e.message;
-    }
-}
-function PSL_WriteBase64End() {
-    try {
-        if (!_PSL_B64F) return "ERR:未初始化";
-        var f = _PSL_B64F;
-        _PSL_B64F = null;
-        f.close();
-        return "OK:1";
-    } catch (e) {
-        return "ERR:" + e.message;
-    }
-}
 
 // ------------------------------------------------------------
 // 扫描素材根目录（除 _回收站），列出所有「psd + 同名 _t.png + 可选 meta.json」的有效素材
@@ -979,6 +925,8 @@ function _pslFindThumb(folderFs, base) {
 // 判断文件名是否是可入库的素材（psd 或常见图片格式）
 // ⚠ 不能只扫 psd：用户换到其它素材库后，png/jpg 等图片素材也必须能显示
 function _pslIsAssetName(low) {
+    // 隐藏文件与 Mac AppleDouble（._xxx，随文件复制到共享盘时生成）不是素材
+    if (low.charAt(0) === ".") return false;
     if (low.lastIndexOf(".psd") === low.length - 4) return true;
     // 图片格式须与 PSL_ImportFile 支持的保持一致
     var exts = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"];
@@ -1429,6 +1377,18 @@ function PSL_CaptureLayer(dir) {
             } catch (eGray) {}
         }
 
+        // 缩略图控制在 120px（用户要求最小画质：卡片默认 120px，解码快滚动不卡，磁盘只留一个 PNG）
+        try {
+            var tw1 = temp.width, th1 = temp.height;
+            var mT1 = Math.max(tw1, th1);
+            if (mT1 > 120) {
+                var sT1 = 120 / mT1;
+                // 分辨率参数必须传数值（null 在部分版本会抛“参数无效”导致缩略图不缩小）
+                var res1 = temp.resolution || 72;
+                temp.resizeImage(Math.round(tw1 * sT1), Math.round(th1 * sT1), res1, ResampleMethod.BICUBIC);
+            }
+        } catch (eRs1) {}
+
         var pngOpts = new PNGSaveOptions();
         pngOpts.compression = 6;
         pngOpts.interlaced = false;
@@ -1538,11 +1498,15 @@ function PSL_CaptureSelected(dir) {
         try {
             var grp = temp.layerSets.add();
             grp.name = _pslSafeName(displayName) || "MuMu素材";
-            // 从最底层开始依次移入组内（PLACEATEND），保持原堆叠顺序
+            // 从最底层开始依次移入组内（PLACEATEND），保持原堆叠顺序；
+            // 新组位于顶层，循环会取到它自身，跳过避免"把组移进自己"导致编组失败；
+            // 个别层（如空组）move 可能报"非法参数"，跳过它不拖累整组
             for (var g = temp.layers.length - 1; g >= 0; g--) {
-                temp.layers[g].move(grp, ElementPlacement.PLACEATEND);
+                var lyG = temp.layers[g];
+                if (lyG === grp) continue;
+                try { lyG.move(grp, ElementPlacement.PLACEATEND); } catch (eMvG) {}
             }
-        } catch (eGrp) { /* 编组失败退化为散图层保存，插入时动态编组兜底 */ }
+        } catch (eGrp) { /* 编组失败退化为散图层保存，插入时逐个复制兜底 */ }
 
         // 多层素材角标用组图标
         var kind = "group";
@@ -1578,6 +1542,18 @@ function PSL_CaptureSelected(dir) {
         }
 
         try { temp.mergeVisibleLayers(); } catch (eMg) {}
+
+        // 缩略图控制在 120px（用户要求最小画质：卡片默认 120px，解码快滚动不卡，磁盘只留一个 PNG）
+        try {
+            var tw2 = temp.width, th2 = temp.height;
+            var mT2 = Math.max(tw2, th2);
+            if (mT2 > 120) {
+                var sT2 = 120 / mT2;
+                // 分辨率参数必须传数值（null 在部分版本会抛“参数无效”导致缩略图不缩小）
+                var res2 = temp.resolution || 72;
+                temp.resizeImage(Math.round(tw2 * sT2), Math.round(th2 * sT2), res2, ResampleMethod.BICUBIC);
+            }
+        } catch (eRs2) {}
 
         var pngOpts = new PNGSaveOptions();
         pngOpts.compression = 6;
@@ -1725,6 +1701,33 @@ function PSL_MoveAsset(src, newDir) {
     }
 }
 
+// 把 srcDoc 的图层 ly（图层或组，任意嵌套）复制进 tgtDoc：
+//   parentGrp 传 null 表示复制到 tgtDoc 顶层，否则复制进该组内；
+//   图层用 duplicate 直接指定目标（文档顶部或组内末尾），无需逐层 move；
+//   复制时保持源文档激活，目标文档在后台更新不重绘屏幕 → 插入不闪烁
+function _pslDupLayerToDoc(ly, srcDoc, tgtDoc, parentGrp) {
+    if (ly.typename === "LayerSet") {
+        // 创建组必须在目标文档激活时进行（闪一次），组内子层全部后台复制
+        app.activeDocument = tgtDoc;
+        var ng = tgtDoc.layerSets.add();
+        ng.name = ly.name;
+        if (parentGrp) {
+            // 嵌套组：同文档 move 进父组（仅嵌套结构需要，一次）
+            try { ng.move(parentGrp, ElementPlacement.PLACEATEND); } catch (eMv2) {}
+        }
+        // 子层自底向上顺序复制进新组（PLACEATEND = 组内末尾，保持原堆叠顺序）
+        for (var si = 0; si < ly.layers.length; si++) {
+            _pslDupLayerToDoc(ly.layers[si], srcDoc, tgtDoc, ng);
+        }
+        return ng;
+    }
+    app.activeDocument = srcDoc;
+    var target = parentGrp || tgtDoc;
+    // 组内：插到末尾保持顺序；文档顶层：插到顶部保持顺序
+    var pos = parentGrp ? ElementPlacement.PLACEATEND : ElementPlacement.PLACEATBEGINNING;
+    return ly.duplicate(target, pos);
+}
+
 // ------------------------------------------------------------
 // 插入素材到当前画布 —— 保持素材原有图层属性（用户明确不要栅格化）：
 //   PSD：打开 → 把图层原样复制进当前文档（保留文字/调整层/组的属性）
@@ -1764,35 +1767,54 @@ function PSL_InsertLayer(p) {
             }
             if (tops.length === 0) return "ERR:素材文件里没有可用图层";
 
-            var whole = null;   // 复制到目标文档的整体（单图层或整组）
-            if (tops.length > 1) {
-                // 多层散图层：在源文档编成组（组内保持自底向上顺序）再整体复制
-                var grpI = srcDoc.layerSets.add();
-                grpI.name = _pslSafeName(f.name.replace(/\.psd$/i, "")) || "MuMu素材";
-                for (var mi = 0; mi < tops.length; mi++) {
-                    tops[mi].move(grpI, ElementPlacement.PLACEATEND);
-                }
-                whole = grpI;
-            } else {
-                whole = tops[0];
+            // 复制 PSD 顶层元素到目标文档。组优先整组一次复制（不闪烁、保留组结构）；
+            // 个别组（含空组/特殊层）跨文档复制会报"非法参数"，自动回退逐层后台复制（可靠兜底）
+            var d2s = [];
+            for (var ci = 0; ci < tops.length; ci++) {
+                var lyC = tops[ci];
+                try {
+                    if (lyC.typename === "LayerSet") {
+                        app.activeDocument = srcDoc;
+                        var cpG = null;
+                        try {
+                            cpG = lyC.duplicate(tgt, ElementPlacement.PLACEATBEGINNING);
+                        } catch (eGrpDup) {
+                            cpG = _pslDupLayerToDoc(lyC, srcDoc, tgt);
+                        }
+                        if (cpG) d2s.push(cpG);
+                    } else {
+                        app.activeDocument = srcDoc;
+                        var cpL = lyC.duplicate(tgt, ElementPlacement.PLACEATBEGINNING);
+                        if (cpL) d2s.push(cpL);
+                    }
+                } catch (eDup) { /* 单个元素复制失败不影响其余元素 */ }
             }
-
-            var d2 = whole.duplicate(tgt, ElementPlacement.PLACEATBEGINNING);
+            if (d2s.length === 0) return "ERR:素材文件里没有可复制的图层";
 
             srcDoc.close(SaveOptions.DONOTSAVECHANGES);
             srcDoc = null;
             app.activeDocument = tgt;
 
-            // 插入的整体居中到画布（组内相互位置不变，一次平移完成）
-            try {
-                var bb = d2.bounds;
-                var bx0 = bb[0].value, by1 = bb[1].value, bx2 = bb[2].value, by3 = bb[3].value;
-                if (bx2 > bx0 && by3 > by1) {
-                    d2.translate(tgt.width.value / 2 - (bx0 + bx2) / 2,
-                                 tgt.height.value / 2 - (by1 + by3) / 2);
+            // 所有复制结果合并居中到画布（相互位置不变，一次整体平移）
+            var minX = null, minY = null, maxX = null, maxY = null;
+            for (var bi = 0; bi < d2s.length; bi++) {
+                try {
+                    var bb = d2s[bi].bounds;
+                    var b0 = bb[0].value, b1 = bb[1].value, b2 = bb[2].value, b3 = bb[3].value;
+                    if (minX === null || b0 < minX) minX = b0;
+                    if (minY === null || b1 < minY) minY = b1;
+                    if (maxX === null || b2 > maxX) maxX = b2;
+                    if (maxY === null || b3 > maxY) maxY = b3;
+                } catch (eB) {}
+            }
+            if (minX !== null && maxX > minX && maxY > minY) {
+                var dx = tgt.width.value / 2 - (minX + maxX) / 2;
+                var dy = tgt.height.value / 2 - (minY + maxY) / 2;
+                for (var ti = 0; ti < d2s.length; ti++) {
+                    try { d2s[ti].translate(dx, dy); } catch (eT) {}
                 }
-            } catch (eCen) {}
-            try { tgt.activeLayer = d2; } catch (eAL2) {}
+            }
+            try { tgt.activeLayer = d2s[d2s.length - 1]; } catch (eAL2) {}
 
             return "OK";
         }
@@ -1814,7 +1836,7 @@ function PSL_InsertLayer(p) {
         executeAction(charIDToTypeID("Plc "), desc, DialogModes.NO);
         return "OK";
     } catch (e) {
-        return "ERR:" + e.message;
+        return "ERR:" + e.message + " @" + (e.line || "?");
     } finally {
         // 出错时兜底关闭临时打开的 PSD，避免残留文档堆在 PS 里
         try { if (srcDoc !== null) srcDoc.close(SaveOptions.DONOTSAVECHANGES); } catch (e7) {}
