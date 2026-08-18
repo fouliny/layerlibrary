@@ -21,7 +21,7 @@
 
   /* ---------- 状态 ---------- */
   let state = { categories: [], items: [], trash: [] };
-  let settings = { assetDir: "", clickMode: "single", cardSize: 92, theme: "midgray", sortKey: "manual", sortDir: "desc", lastFilter: "", remotePath: "" };
+  let settings = { assetDir: "", clickMode: "single", cardSize: 120, theme: "midgray", sortKey: "manual", sortDir: "desc", lastFilter: "", remotePath: "" };
   // 磁盘扫描索引：{ "C:/.../foo.psd": "1735000000000:12345", ... }  用于增量扫描
   // 只存指纹（mtime+size），不存其它元数据，体积很小（~50 字节/素材）
   let scanIndex = {};
@@ -222,7 +222,7 @@
     try { localStorage.setItem(SET_KEY, JSON.stringify(settings)); } catch (e) {}
   }
   function applyCardSize() {
-    const px = Math.max(48, Math.min(260, Number(settings.cardSize) || 120));
+    const px = Math.max(80, Math.min(260, Number(settings.cardSize) || 120));
     document.documentElement.style.setProperty("--card-min", px + "px");
   }
 
@@ -297,7 +297,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = "32.2.2";   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = "32.2.6";   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = "";                 // 检测到的 hostscript 实际版本（设置面板展示）
 
   // 语义化版本比较：'32.1.1' > '32.1' > '32'（缺段补 0）；返回 a > b
@@ -448,8 +448,8 @@
     // 后台增量校正（fire-and-forget）：新条目已在本地 state 里，同步只做磁盘对齐，不阻塞提示
     if (!MOCK && hostReady) runBackgroundSync({ silent: true });
     renderAll();
-    if (savedCount > 1) toast("已保存 " + savedCount + " 个图层");
-    else toast("已保存图层「" + lastName + "」");
+    if (savedCount > 1) toast("已添加入库 " + savedCount + " 个图层");
+    else toast("已添加入库「" + lastName + "」");
   }
 
   // file:// 加载失败时的降级：走 ExtendScript 读 base64
@@ -1022,7 +1022,7 @@
   function recalcCols(cardSize) {
     const g = $("#grid");
     if (!g || g.clientWidth <= 0) return;
-    const cs = cardSize || Math.max(48, Math.min(260, Number(settings.cardSize) || 120));
+    const cs = cardSize || Math.max(80, Math.min(260, Number(settings.cardSize) || 120));
     const cols = Math.max(1, Math.floor(g.clientWidth / cs));
     g.style.gridTemplateColumns = "repeat(" + cols + ", 1fr)";
   }
@@ -1044,6 +1044,28 @@
   // ⚠ Observer 全生命周期复用一个（旧写法每次渲染重建，大列表下开销可观），
   //    每次渲染前 disconnect() 清掉旧观察对象即可，不会泄漏
   let lazyObserver = null;
+  // 懒加载并发限制：图片素材的预览就是原图（可能几 MB），快速滚动时同时解码
+  // 几十张大图会把 CEF 渲染线程打满 → 预览迟迟不出、界面卡顿。
+  // 用简单队列：同时最多 THUMB_LOAD_CAP 张在加载，其余排队，避免解码洪峰
+  const THUMB_LOAD_CAP = 6;
+  const _thumbQueue = [];
+  let _thumbLoading = 0;
+  function thumbLoadNext() {
+    while (_thumbLoading < THUMB_LOAD_CAP && _thumbQueue.length) {
+      const job = _thumbQueue.shift();
+      _thumbLoading++;
+      const img = job.img;
+      img.addEventListener("load", () => { _thumbLoading--; thumbLoadNext(); });
+      img.addEventListener("error", () => { _thumbLoading--; thumbLoadNext(); });
+      img.src = job.src;
+    }
+  }
+  function thumbLoad(img, src) {
+    if (img.dataset.srcQueued) return;   // 已在队列（renderGrid 重建后旧 img 不再排队）
+    img.dataset.srcQueued = "1";
+    _thumbQueue.push({ img: img, src: src });
+    thumbLoadNext();
+  }
   function getLazyObserver() {
     // 老 CEP（Chromium <51）没 IntersectionObserver，返回 null 让卡片走立即加载分支
     if (typeof IntersectionObserver === "undefined") return null;
@@ -1053,7 +1075,7 @@
           if (!e.isIntersecting) continue;
           const img = e.target;
           const src = img.dataset.src;
-          if (src) img.src = src;          // 真正加载图片
+          if (src) thumbLoad(img, src);      // 入队限并发，而不是一次性全部设 src
           lazyObserver.unobserve(img);     // 加载过就不再观察
         }
       }, { root: grid, rootMargin: "400px 0px" });
@@ -1138,7 +1160,7 @@
       : (catById[filterCat] || {}).name || "图层";
     itemCount.textContent = items.length;
 
-    // 回收站视图：底部按钮变身「清空回收站」（红色）；普通视图：恢复为「保存图层」
+    // 回收站视图：底部按钮变身「清空回收站」（红色）；普通视图：恢复为「添加入库」
     // 只在模式变化时重写 innerHTML（每次渲染都重写会无谓触发 DOM 重建）
     const btnMode = isTrash ? "trash" : "normal";
     if (btnMode !== _saveBtnMode) {
@@ -1150,7 +1172,7 @@
       } else {
         saveBtn.className = "btn-primary block";
         saveBtn.title = "把 PS 中选中的图层存入当前分类";
-        saveBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 3v12m0-12 4 4m-4-4-4 4M5 21h14"/></svg>\n        保存图层';
+        saveBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 3v12m0-12 4 4m-4-4-4 4M5 21h14"/></svg>\n        添加入库';
       }
     }
 
@@ -1207,7 +1229,6 @@
   // 构建单张卡片（从 renderGrid 拆出，便于分批渲染）
   function buildCard(it, o) {
     const isTrash = o.isTrash, single = o.single, lazy = o.lazy;
-    const cat = o.catById[it.categoryId];
     const missing = !isTrash && missingIds.has(it.id);
     const card = document.createElement("div");
     card.className = "card" + (isTrash ? " card-trashed" : "") + (missing ? " card-missing" : "");
@@ -1231,9 +1252,7 @@
       : missing
         ? '<span class="card-badge b-miss" title="素材文件已被手动删除（在资源管理器里删了）">缺</span>'
         : (bd ? '<span class="card-badge ' + bd[0] + '" title="' + bd[2] + '">' + bd[1] + '</span>' : "");
-    const sub = isTrash
-      ? "原属：" + (it.fromCatName || DEFAULT_CAT_NAME)
-      : (cat ? cat.name : DEFAULT_CAT_NAME);
+    const sub = isTrash ? "原属：" + (it.fromCatName || DEFAULT_CAT_NAME) : "";
     const missingOverlay = missing
       ? '<div class="card-missing-ov">⚠ 文件已删除</div>' : "";
     card.innerHTML =
@@ -1242,11 +1261,11 @@
       '</button>' +
       starBtn +
       badge +
-      '<div class="thumb-wrap" style="width:100%;height:' + settings.cardSize + 'px;overflow:hidden;"><img class="card-thumb" alt="' + escapeHtml(it.name) + '" draggable="false" /></div>' +
+      '<div class="thumb-wrap"><img class="card-thumb" alt="' + escapeHtml(it.name) + '" draggable="false" /></div>' +
       missingOverlay +
       '<div class="card-meta">' +
         '<div class="card-name" title="' + escapeHtml(it.name) + '">' + escapeHtml(it.name) + '</div>' +
-        '<div class="card-cat" title="' + escapeHtml(sub) + '">' + escapeHtml(sub) + '</div>' +
+        (isTrash ? '<div class="card-cat" title="' + escapeHtml(sub) + '">' + escapeHtml(sub) + '</div>' : "") +
       '</div>';
 
     const img = card.querySelector(".card-thumb");
@@ -1262,7 +1281,7 @@
         img.dataset.src = thumb;
         lazy.observe(img);
       } else {
-        img.src = thumb;
+        thumbLoad(img, thumb);   // 老 CEP 也走并发队列，避免一次解码几十张大图
       }
     } else {
       img.style.visibility = "hidden";
@@ -1561,13 +1580,20 @@
     const checkable = src.filter((it) => it.file || it.thumb);
     if (!checkable.length) { missingIds.clear(); return; }
 
-    const spec = checkable.map((it) => it.id + "::" + (it.file || it.thumb)).join("|");
-    let res;
-    try { res = await evalScript("PSL_CheckFiles('" + esc(spec) + "')"); }
-    catch (e) { return; }
-    if (token !== _verifyToken) return;   // 视图已切换，丢弃过期结果
-
-    const flags = payload(res).split("|");
+    // 分片校验：素材多时一次性传几千个路径，PS 主线程要长时间 stat 全库，
+    // 打开面板/切分类会明显卡顿；每批 60 个 + 让出 30ms，PS 与面板都保持可响应
+    const flags = new Array(checkable.length).fill("1");
+    for (let k = 0; k < checkable.length; k += 60) {
+      const chunk = checkable.slice(k, k + 60);
+      const spec = chunk.map((it) => it.id + "::" + (it.file || it.thumb)).join("|");
+      let res;
+      try { res = await evalScript("PSL_CheckFiles('" + esc(spec) + "')"); }
+      catch (e) { return; }   // 中途失败放弃本轮，下轮 renderGrid 再校验
+      if (token !== _verifyToken) return;   // 视图已切换，丢弃过期结果
+      const fl = payload(res).split("|");
+      for (let j = 0; j < fl.length && k + j < checkable.length; j++) flags[k + j] = fl[j];
+      await new Promise((rs) => setTimeout(rs, 30));
+    }
     const newMissing = new Set();
     let changed = false;
     checkable.forEach((it, i) => {
@@ -2527,6 +2553,7 @@
       }
       // 增量重建：分片指纹扫描（与后台同步同通道），指纹相同自动跳过，只处理新增/变化文件，
       // 远快于全量枚举；scanIndex 缺失/损坏时自然退化为全量（全部判新增）
+      // compress=true：每次重建索引都检查 psd 配套缩略图，超 120px 就压缩覆盖（图片原图不碰）
       if (onProgress) onProgress(2, "正在增量重建索引（只处理变化文件）…");
       let c1 = 0, c2 = 0;
       try {
@@ -2745,7 +2772,7 @@
   function openSettings() {
     setDir.value = settings.assetDir || "";
     setClick.value = settings.clickMode === "double" ? "double" : "single";
-    setSize.value = settings.cardSize || 92;
+    setSize.value = settings.cardSize || 120;
     setSizeVal.textContent = setSize.value + " px";
     setRemote.value = settings.remotePath || "";
     setRemoteStatus("");
@@ -2851,7 +2878,7 @@
 
     // 先落地不涉及文件系统的设置
     settings.clickMode = setClick.value === "double" ? "double" : "single";
-    settings.cardSize = Number(setSize.value) || 92;
+    settings.cardSize = Number(setSize.value) || 120;
     settings.theme = settings.theme || "midgray";   // 主题已在选择时写入，这里确保有值
     settings.remotePath = (setRemote.value || "").trim();
 
@@ -2955,13 +2982,15 @@
     }, 500);
   }
 
-  // 解析远程路径：smb:// 、http(s):// 、\\. 前缀 → { type, path }
+  // 解析远程路径：smb:// 、\\ 、// 前缀 → { type, path }（仅支持 SMB，HTTP 已移除）；
+  // POSIX 绝对路径（Mac 上 SMB 挂载点 /Volumes/共享名/素材库）原样放行，
+  // smb:// 转换出的 //server/share 只对 Windows UNC 有效，Mac 需用挂载后的路径
   function normRemotePath(p) {
     const s = String(p || "").trim();
-    if (/^https?:\/\//i.test(s)) return { type: "http", path: s };
     if (/^smb:\/\//i.test(s)) return { type: "smb", path: "//" + s.slice(6).replace(/\/+/g, "/") };
     if (/^\\/.test(s)) return { type: "smb", path: s.replace(/\\/g, "/") };
     if (/^\/\//.test(s)) return { type: "smb", path: s };
+    if (/^\/[^\/]/.test(s)) return { type: "smb", path: s };   // Mac：/Volumes/…（已挂载）
     return null;
   }
 
@@ -2969,19 +2998,7 @@
     return String(a).replace(/\/+$/, "") + "/" + String(b);
   }
 
-  // ArrayBuffer → base64 分片（避免超大字符串卡死/爆栈）
-  function bytesToBase64Chunks(buf, chunkBytes) {
-    const u8 = new Uint8Array(buf);
-    const parts = [];
-    for (let i = 0; i < u8.length; i += chunkBytes) {
-      let bin = "";
-      const end = Math.min(i + chunkBytes, u8.length);
-      for (let j = i; j < end; j++) bin += String.fromCharCode(u8[j]);
-      parts.push(btoa(bin));
-    }
-    return parts;
-  }
-
+  // GitHub 更新检查用：CEP 的 fetch 可直接查询 API（20s 超时兜底，防网络卡死面板）
   async function fetchRemote(url) {
     const ctrl = window.AbortController ? new AbortController() : null;
     const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
@@ -2998,16 +3015,15 @@
     if (!hostReady) { toast("PS 联动未就绪，请重开面板后重试", true); return; }
     if (!settings.assetDir) { toast("请先在设置里确定素材保存位置", true); return; }
     const raw = (setRemote.value || settings.remotePath || "").trim();
-    if (!raw) { toast("请先填写远程路径（smb:// 或 http://）", true); return; }
+    if (!raw) { toast("请先填写远程路径（smb://、\\\\服务器\\共享；Mac 用 /Volumes/…）", true); return; }
     const norm = normRemotePath(raw);
-    if (!norm) { toast("无法识别的远程路径格式（支持 smb:// 和 http(s)://）", true); return; }
+    if (!norm) { toast("无法识别的远程路径格式（支持 smb://、\\\\服务器\\共享；Mac 用 /Volumes/…）", true); return; }
     settings.remotePath = raw;
     saveSettings();
     remoteCheck.disabled = true;
     rebuildIndex.disabled = true;
     try {
-      if (norm.type === "smb") await syncRemoteSmb(norm.path);
-      else await syncRemoteHttp(norm.path);
+      await syncRemoteSmb(norm.path);
     } finally {
       remoteCheck.disabled = false;
       rebuildIndex.disabled = false;
@@ -3027,9 +3043,15 @@
       const m = /added=(\d+),updated=(\d+),failed=(\d+)/.exec(res);
       if (!m) throw new Error(res);
       const failedN = Number(m[3]);
-      // 同步返回里附带了实际复制的素材行：面板直接增量合并，无需全量重建（快）
-      const nl = String(res).indexOf("\n");
-      const lines = nl >= 0 ? String(res).slice(nl + 1).split("\n").filter((l) => l.trim()) : [];
+      // 同步返回里附带了远程分类清单（CATS: 行）与实际复制的素材行：
+      // 面板据此增量合并（免全量重建）+ 删除对齐（远程改名/删除的分类本地不保留）
+      const allLines = String(res).split("\n").filter((l) => l.trim());
+      let catLine = "";
+      const lines = allLines.filter((l) => {
+        if (l.indexOf("CATS:") === 0) { catLine = l.slice(5); return false; }
+        return true;
+      });
+      const remoteCats = catLine ? catLine.split("\u0001").filter((x) => x) : [];
       setSyncProgress(100, "复制完成，正在更新面板…");
       // 磁盘已变化：先同步分类文件夹（补新分类），再增量合并复制的素材
       try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 同步后同步分类失败:", e); }
@@ -3041,6 +3063,8 @@
         }
         if (its.length) { mergeItems(its); saveState(); saveScanIndex(); }
       }
+      // 删除对齐：远程已改名/删除的分类 → 本地对应文件夹移入回收站（防"改名后两份素材"）
+      try { await pruneLocalCats(remoteCats); } catch (e) { console.error("[MuMu助手] 同步后删除对齐失败:", e); }
       // 排序随库走（单向，以远程为准）：读远程 .mu_index.json 的排序应用到本地
       try {
         const ris = await evalScript("PSL_ReadIndex('" + esc(remoteRoot) + "')");
@@ -3067,141 +3091,56 @@
     }
   }
 
-  // HTTP(S)：拉取远程 .mu_index.json → 对比本地 → 分片下载素材/缩略图 → 写 meta
-  async function syncRemoteHttp(base) {
-    const baseUrl = String(base).replace(/\/+$/, "");
-    setRemoteStatus("正在获取远程素材索引…");
-    setSyncProgress(0, "正在获取远程素材索引…");
-    let idx;
+  // 远程同步删除对齐：远程已不存在的本地分类文件夹 → 整体移入回收站（可恢复，不物理删除），
+  // 面板同步移除对应分类与素材条目；仅远程清单非空时执行（远程路径填错/空库不误删本地）
+  async function pruneLocalCats(remoteCatNames) {
+    if (MOCK || !hostReady || !assetRoot()) return 0;
+    const remote = new Set((remoteCatNames || []).map((n) => String(n || "").trim().toLowerCase()));
+    if (!remote.size) return 0;
+    let list;
     try {
-      const r = await fetchRemote(baseUrl + "/.mu_index.json");
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      idx = await r.json();
+      list = payload(await evalScript("PSL_ListCatDirs('" + esc(assetRoot()) + "')"));
     } catch (e) {
-      setRemoteStatus("无法获取远程索引：请确认路径是 MuMu 素材库根目录（含 .mu_index.json）且服务器允许访问", false);
-      setSyncProgress(null);
-      return;
+      console.error("[MuMu助手] 删除对齐列目录失败:", e);
+      return 0;
     }
-    const items = (idx && Array.isArray(idx.items)) ? idx.items.filter((it) => it && it.file) : [];
-    if (!items.length) { setRemoteStatus("远程素材库为空", false); setSyncProgress(null); return; }
-
-    // 组装同步任务：从索引的绝对路径推出 分类目录名/文件名 → 本地目标 + 远程 URL
-    const jobs = [];
-    for (const it of items) {
-      const f = String(it.file).replace(/\\/g, "/");
-      const segs = f.split("/");
-      const fileName = segs[segs.length - 1];
-      const catDir = segs[segs.length - 2];
-      if (!fileName || !catDir || catDir.charAt(0) === "." || catDir === "_回收站") continue;
-      const localFile = pathJoin(pathJoin(settings.assetDir, catDir), fileName);
-      const url = baseUrl + "/" + encodeURI(catDir) + "/" + encodeURI(fileName);
-      const isPsd = /\.psd$/i.test(fileName);
-      let thumbUrl = "", thumbName = "";
-      if (isPsd && it.thumb) {
-        const t = String(it.thumb).replace(/\\/g, "/").split("/");
-        thumbName = t[t.length - 1] || "";
-        if (thumbName) thumbUrl = baseUrl + "/" + encodeURI(catDir) + "/" + encodeURI(thumbName);
-      }
-      jobs.push({ it, fileName, catDir, localFile, url, thumbUrl, thumbName, isPsd });
-    }
-
-    // 本地存在性 + 大小对比（批量，一次桥接）
-    let sizes;
-    try {
-      sizes = payload(await evalScript("PSL_GetSizes('" + esc(jobs.map((j) => j.localFile).join("|")) + "')")).split("|");
-    } catch (e) {
-      setRemoteStatus("本地素材库检查失败：" + e.message, false);
-      setSyncProgress(null);
-      return;
-    }
-    const todo = [];
-    jobs.forEach((j, i) => {
-      const localSize = Number(sizes[i] || "0");
-      const remoteSize = Number(j.it.size || 0);
-      if (localSize === 0 || (remoteSize > 0 && localSize !== remoteSize)) todo.push(j);
-    });
-    if (!todo.length) {
-      // 素材已是最新：仍需把磁盘分类文件夹同步成面板分类，并纠正误标未分类的存量条目
-      setSyncProgress(0, "正在同步分类与索引…");
-      try { await syncCategoryFolders(true); } catch (e) {}
-      // 排序随库走（单向，以远程为准）：远程索引的排序应用到本地
-      try { if (applyOrderFromParsed(idx)) saveState(); } catch (eO2) {}
-      reclassifyItems();
-      jumpToCategoryWithItems();
-      setSyncProgress(null);
-      setRemoteStatus("远程素材与本地一致，无需更新", true);
-      return;
-    }
-
-    // 逐个下载（素材 → 缩略图 → meta），分片写盘；进度按已下载字节/总字节显示
-    let added = 0, updated = 0, failed = 0, done = 0;
-    const totalBytes = todo.reduce((s, j) => s + (Number(j.it.size) || 0), 0);
-    let doneBytes = 0;
-    const newItems = [];   // 成功下载的素材条目（增量合并，免全量重建）
-    setRemoteStatus("正在同步 " + todo.length + " 个素材（大文件可能需要一点时间）…");
-    for (const j of todo) {
+    const dirs = String(list || "").split("|")
+      .map((d) => String(d || "").trim())
+      .filter((d) => d && d.toLowerCase() !== TRASH_DIR.toLowerCase());
+    const goneDirs = dirs.filter((d) => !remote.has(d.toLowerCase()));
+    if (!goneDirs.length) return 0;
+    let removed = 0;
+    for (const d of goneDirs) {
       try {
-        const buf = await (await fetchRemote(j.url)).arrayBuffer();
-        doneBytes += buf.byteLength;
-        done++;
-        const pct = totalBytes > 0 ? Math.round(doneBytes / totalBytes * 100) : Math.round(done / todo.length * 100);
-        setSyncProgress(pct, "正在下载素材 " + done + "/" + todo.length + "：" + j.fileName + " " + pct + "%");
-        const chunks = bytesToBase64Chunks(buf, 393216);
-        await evalScript("PSL_WriteBase64Begin('" + esc(j.localFile) + "')");
-        for (const c of chunks) await evalScript("PSL_WriteBase64Chunk('" + c + "')");
-        await evalScript("PSL_WriteBase64End()");
-        let thumbPath = "";
-        if (j.thumbUrl) {
-          try {
-            const tb = await (await fetchRemote(j.thumbUrl)).arrayBuffer();
-            const tc = bytesToBase64Chunks(tb, 393216);
-            thumbPath = pathJoin(pathJoin(settings.assetDir, j.catDir), j.thumbName);
-            await evalScript("PSL_WriteBase64Begin('" + esc(thumbPath) + "')");
-            for (const c of tc) await evalScript("PSL_WriteBase64Chunk('" + c + "')");
-            await evalScript("PSL_WriteBase64End()");
-          } catch (eT) { /* 缩略图失败不影响素材入库 */ }
-        }
-        await evalScript(
-          "PSL_WriteMeta('" + esc(j.localFile) + "','" + esc(j.it.kind || "") + "','" +
-          esc(j.it.name || "") + "'," + (Number(j.it.createdAt) || 0) + "," + (j.it.star ? 1 : 0) + ")"
-        );
-        if (Number(sizes[jobs.indexOf(j)]) === 0) added++; else updated++;
-        // 构造条目：下载成功的素材直接进面板，无需全量重建
-        const catRef = state.categories.find((c) =>
-          (c.dir || safeDirName(c.name)).toLowerCase() === j.catDir.toLowerCase()) ||
-          state.categories.find((c) => c.name && c.name.toLowerCase() === j.catDir.toLowerCase());
-        newItems.push({
-          id: j.localFile, file: j.localFile,
-          thumb: thumbPath || undefined,
-          kind: j.it.kind || undefined,
-          name: j.it.name || j.fileName.replace(/\.psd$/i, ""),
-          categoryId: catRef ? catRef.id : "uncat",
-          starred: j.it.star ? 1 : 0,
-          createdAt: Number(j.it.createdAt) || Date.now(),
-          size: Number(j.it.size) || 0,
-          order: Number(j.it.order) || 0   // 远程手动排序（索引里的 order，随库走）
-        });
-      } catch (eD) {
-        failed++;
-        console.error("[MuMu助手] 远程素材下载失败:", j.url, eD);
+        const r = payload(await evalScript("PSL_TrashCatDir('" + esc(assetRoot()) + "','" + esc(d) + "')"));
+        if (String(r).indexOf("ERR:") === 0) { console.warn("[MuMu助手] 回收分类失败:", d, r); continue; }
+        removed++;
+      } catch (e) { console.warn("[MuMu助手] 回收分类失败:", d, e); }
+    }
+    if (removed) {
+      const gone = new Set(goneDirs.map((d) => d.toLowerCase()));
+      const beforeC = state.categories.length;
+      state.categories = state.categories.filter((c) => !gone.has((c.dir || safeDirName(c.name)).toLowerCase()));
+      const beforeI = state.items.length;
+      state.items = state.items.filter((it) => {
+        const p = String(it.file || "").replace(/\\/g, "/");
+        const dir = p.slice(0, p.lastIndexOf("/"));
+        const dn = dir.slice(dir.lastIndexOf("/") + 1);
+        return !gone.has(dn.toLowerCase());
+      });
+      const nDel = beforeC - state.categories.length + beforeI - state.items.length;
+      if (nDel > 0) {
+        saveState();
+        saveScanIndex();
+        toast("远程已删除 " + removed + " 个分类，本地对应分类已移入回收站");
       }
     }
-    // 磁盘已变化：先同步分类文件夹（补新分类），再增量合并成功下载的素材
-    try { await syncCategoryFolders(true); } catch (e) { console.error("[MuMu助手] 同步后同步分类失败:", e); }
-    setSyncProgress(100, "下载完成，正在更新面板…");
-    if (newItems.length) { mergeItems(newItems); saveState(); saveScanIndex(); }
-    // 排序随库走（单向，以远程为准）：远程索引的排序应用到本地
-    try { if (applyOrderFromParsed(idx)) saveState(); } catch (eO3) {}
-    reclassifyItems();
-    renderAll();
-    jumpToCategoryWithItems();
-    scheduleIndexWrite();
-    setSyncProgress(null);
-    setRemoteStatus(
-      "完成：新增 " + added + " 个，更新 " + updated + " 个" + (failed ? "，失败 " + failed + " 个" : ""),
-      failed === 0
-    );
+    return removed;
   }
+
+
+
+
 
   // 同步完成后面板仍停在看不到素材的视图时，自动跳到一个有素材的分类：
   // ① 欢迎界面（filterCat 空）：直接跳第一个非空分类；

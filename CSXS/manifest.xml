@@ -46,7 +46,7 @@
                         </MaxSize>
                         <MinSize>
                             <Height>300</Height>
-                            <Width>260</Width>
+                            <Width>320</Width>   <!-- 与 .panel 的 min-width:320px 一致，防止拖窄导致控件堆叠 -->
                         </MinSize>
                     </Geometry>
                     <Icons>
