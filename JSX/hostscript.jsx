@@ -20,7 +20,7 @@ var _PSL_INDEX_NAME = ".mu_index.json";
 // 脚本版本号：每次改动 hostscript 后 +1。
 // 面板启动时用它检测 PS 内存里是否还是旧版脚本：ExtendScript 全局在 PS 运行期间
 // 一直保留，旧函数不会自动更新 —— 不重加载新函数就不存在 → 扫描静默失败（只显分类不显素材）
-var PSL_SCRIPT_VERSION = "32.2.6";
+var PSL_SCRIPT_VERSION = "32.2.8";
 function PSL_Version() {
     return "OK:" + PSL_SCRIPT_VERSION;
 }
@@ -1756,9 +1756,9 @@ function PSL_InsertLayer(p) {
             srcDoc = app.open(f);
             app.activeDocument = srcDoc;   // duplicate 跨文档时源必须是激活文档
 
-            // 整组插入：素材 PSD 顶层若已是组（多选保存的素材）直接整组复制；
-            // 多层散图层（旧素材/手工整理的 PSD）先在源文档编成组再整体复制。
-            // 一次 duplicate 完成，避免逐层复制导致画布闪烁多次
+            // 整组插入：素材 PSD 顶层整理成单一组后整体复制，目标画布只重绘一次不闪烁。
+            // 顶层已是单个组（多选保存的素材）直接复用；多层散图层/混合结构在源文档内
+            // 编成组（后台整理不碰目标画布），再整组一次 duplicate 进当前文档
             var tops = [];
             for (var li = srcDoc.layers.length - 1; li >= 0; li--) {
                 var lyT = srcDoc.layers[li];
@@ -1767,27 +1767,34 @@ function PSL_InsertLayer(p) {
             }
             if (tops.length === 0) return "ERR:素材文件里没有可用图层";
 
-            // 复制 PSD 顶层元素到目标文档。组优先整组一次复制（不闪烁、保留组结构）；
-            // 个别组（含空组/特殊层）跨文档复制会报"非法参数"，自动回退逐层后台复制（可靠兜底）
             var d2s = [];
-            for (var ci = 0; ci < tops.length; ci++) {
-                var lyC = tops[ci];
+            if (tops.length === 1) {
+                // 单层素材直接复制该层（普通图层/组都行），不额外编组 → 插入后保持图层形态
+                app.activeDocument = srcDoc;
+                var cpOne = null;
                 try {
-                    if (lyC.typename === "LayerSet") {
-                        app.activeDocument = srcDoc;
-                        var cpG = null;
-                        try {
-                            cpG = lyC.duplicate(tgt, ElementPlacement.PLACEATBEGINNING);
-                        } catch (eGrpDup) {
-                            cpG = _pslDupLayerToDoc(lyC, srcDoc, tgt);
-                        }
-                        if (cpG) d2s.push(cpG);
-                    } else {
-                        app.activeDocument = srcDoc;
-                        var cpL = lyC.duplicate(tgt, ElementPlacement.PLACEATBEGINNING);
-                        if (cpL) d2s.push(cpL);
-                    }
-                } catch (eDup) { /* 单个元素复制失败不影响其余元素 */ }
+                    cpOne = tops[0].duplicate(tgt, ElementPlacement.PLACEATBEGINNING);
+                } catch (eOneDup) {
+                    cpOne = _pslDupLayerToDoc(tops[0], srcDoc, tgt);
+                }
+                if (cpOne) d2s.push(cpOne);
+            } else {
+                // 多层散图层/混合结构：源文档内编组（后台整理不碰目标画布），
+                // 再整组一次复制进目标文档（不闪烁、保留组结构）；
+                // 个别组（含空组/特殊层）跨文档复制会报"非法参数"，自动回退逐层后台复制（可靠兜底）
+                var srcGrp = srcDoc.layerSets.add();
+                srcGrp.name = f.name.replace(/\.psd$/i, "");
+                for (var mi = 0; mi < tops.length; mi++) {
+                    try { tops[mi].move(srcGrp, ElementPlacement.PLACEATBEGINNING); } catch (eMv3) {}
+                }
+                app.activeDocument = srcDoc;
+                var cpG = null;
+                try {
+                    cpG = srcGrp.duplicate(tgt, ElementPlacement.PLACEATBEGINNING);
+                } catch (eGrpDup) {
+                    cpG = _pslDupLayerToDoc(srcGrp, srcDoc, tgt);
+                }
+                if (cpG) d2s.push(cpG);
             }
             if (d2s.length === 0) return "ERR:素材文件里没有可复制的图层";
 
