@@ -276,6 +276,11 @@ input, textarea {
   width: auto; height: auto;
   display: block;
 }
+/* 缺缩略图占位图标：小号居中显示（后台补生成成功前），保持卡片不割裂 */
+.card-thumb.thumb-none {
+  width: 34%; height: 34%;
+  opacity: .4;
+}
 /* 素材名：半透明渐变条覆盖在缩略图底部，卡片因此保持正方形、不再拉长 */
 .card-meta {
   position: absolute; left: 0; right: 0; bottom: 0;

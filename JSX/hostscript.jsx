@@ -20,7 +20,7 @@ var _PSL_INDEX_NAME = ".mu_index.json";
 // 脚本版本号：每次改动 hostscript 后 +1。
 // 面板启动时用它检测 PS 内存里是否还是旧版脚本：ExtendScript 全局在 PS 运行期间
 // 一直保留，旧函数不会自动更新 —— 不重加载新函数就不存在 → 扫描静默失败（只显分类不显素材）
-var PSL_SCRIPT_VERSION = "32.2.8";
+var PSL_SCRIPT_VERSION = "32.2.9";
 function PSL_Version() {
     return "OK:" + PSL_SCRIPT_VERSION;
 }
@@ -1875,6 +1875,85 @@ function PSL_DeleteAsset(p, thumb) {
         return "OK";
     } catch (e) {
         return "ERR:" + e.message;
+    }
+}
+
+// ------------------------------------------------------------
+// 给存量 psd 素材补生成配套缩略图 _t.png（老素材 / 远程同步缺缩略图时后台调用）：
+//   打开 psd → 临时副本合并可见 → 透明裁剪 → 缩到 120px → 存配套 _t.png → 关闭不保存
+//   命名与 _pslFindThumb 一致（规则 A：X.psd→X_t.png；规则 B：X_<ts>.psd→X_t_<ts>.png）
+// 已有缩略图直接返回 "OK:pngPath"；任何失败返回 "ERR:..."
+// 窗口最小化 + 无弹窗执行，尽量不打扰用户当前画布；结束后恢复原活动文档
+// ------------------------------------------------------------
+function PSL_EnsureThumb(fsPath) {
+    var savedUnits = null, prevDlg = null, prevDoc = null, doc = null, temp = null;
+    try {
+        var f = new File(_pslNorm(fsPath));
+        if (!f.exists) return "ERR:文件不存在";
+        var stem = f.fsName.replace(/\.psd$/i, "");
+        var mB = /^(.+)_(\d+)$/.exec(stem);
+        var pngPath = (mB ? mB[1] + "_t_" + mB[2] : stem + "_t") + ".png";
+        if (new File(pngPath).exists) return "OK:" + pngPath;
+        savedUnits = app.preferences.rulerUnits;
+        prevDlg = app.displayDialogs;
+        try { prevDoc = app.activeDocument; } catch (ePd) { prevDoc = null; }
+        app.preferences.rulerUnits = Units.PIXELS;
+        app.displayDialogs = DialogModes.NO;
+        doc = app.open(f);
+        try { doc.windows[0].minimize(); } catch (eWin) {}
+        temp = doc.duplicate("psl_thumb", true);
+        try { temp.windows[0].minimize(); } catch (eWin2) {}
+        try { temp.mergeVisibleLayers(); } catch (eMv) {}
+        var trimmed = false;
+        try { temp.trim(TrimType.TRANSPARENT); trimmed = true; } catch (eTrim) {}
+        if (!trimmed) {
+            // 全透明/无可见像素：垫一层中性灰再合并（与保存素材逻辑一致）
+            try {
+                var fillL = temp.artLayers.add();
+                fillL.name = "PSL_fill";
+                var sc = new SolidColor();
+                sc.rgb.red = 130; sc.rgb.green = 130; sc.rgb.blue = 130;
+                temp.activeLayer = fillL;
+                temp.selection.selectAll();
+                temp.selection.fill(sc, ColorBlendMode.NORMAL, 100, false);
+                temp.selection.deselect();
+                fillL.move(temp.layers[temp.layers.length - 1], ElementPlacement.PLACEATEND);
+                temp.mergeVisibleLayers();
+                try { temp.trim(TrimType.TRANSPARENT); } catch (eT2) {}
+            } catch (eGray) {}
+        }
+        // 缩略图控制在 120px（与保存素材一致：卡片 120px 解码快，磁盘只留一个小 PNG）
+        try {
+            var tw = temp.width, th = temp.height;
+            var mT = Math.max(tw, th);
+            if (mT > 120) {
+                var sT = 120 / mT;
+                var res = temp.resolution || 72;
+                temp.resizeImage(Math.round(tw * sT), Math.round(th * sT), res, ResampleMethod.BICUBIC);
+            }
+        } catch (eRs) {}
+        var pngOpts = new PNGSaveOptions();
+        pngOpts.compression = 6;
+        pngOpts.interlaced = false;
+        temp.saveAs(new File(pngPath), pngOpts, true, Extension.LOWERCASE);
+        temp.close(SaveOptions.DONOTSAVECHANGES);
+        temp = null;
+        doc.close(SaveOptions.DONOTSAVECHANGES);
+        doc = null;
+        if (prevDoc !== null && prevDoc !== undefined) {
+            try { if (prevDoc.valid) app.activeDocument = prevDoc; } catch (eAct) {}
+        }
+        return "OK:" + pngPath;
+    } catch (e) {
+        try { if (temp !== null) temp.close(SaveOptions.DONOTSAVECHANGES); } catch (e2) {}
+        try { if (doc !== null) doc.close(SaveOptions.DONOTSAVECHANGES); } catch (e3) {}
+        if (prevDoc !== null && prevDoc !== undefined) {
+            try { if (prevDoc.valid) app.activeDocument = prevDoc; } catch (e4) {}
+        }
+        return "ERR:" + e.message;
+    } finally {
+        try { if (savedUnits !== null) app.preferences.rulerUnits = savedUnits; } catch (e5) {}
+        try { if (prevDlg !== null) app.displayDialogs = prevDlg; } catch (e6) {}
     }
 }
 

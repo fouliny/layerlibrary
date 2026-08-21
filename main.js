@@ -233,10 +233,26 @@
     if (s.charAt(0) !== "/") s = "/" + s;      // C:/x → /C:/x
     return "file://" + encodeURI(s).replace(/#/g, "%23").replace(/\?/g, "%3F");
   }
+  // 缺缩略图占位图标（内联 SVG data URI：即时显示不占懒加载队列；
+  // 真实素材后台补生成缩略图成功后自动换成真图）
+  const NO_THUMB_ICON = "data:image/svg+xml;utf8," + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8f9c" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
+    '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.6"/>' +
+    '<path d="M21 15l-5-5L5 21"/></svg>'
+  );
   function thumbFor(item) {
-    if (item._thumb) return item._thumb;       // base64 降级方案
-    if (item.thumb) return item.thumb;         // mock
-    if (item.file) return fileUrl(item.file);  // 真实模式
+    if (item._thumb) return item._thumb;                 // base64 降级方案（已缓存）
+    if (item.file) {
+      // 真实模式：优先缩略图（小 png 秒开）。必须转 file://——
+      // 裸 Windows 路径当 img.src 浏览器必然加载失败，每个卡片都会退回
+      // evalScript 读 base64 慢链路，滚动快时几十个同时挤在桥接队列 → 延迟几秒
+      if (item.thumb) return fileUrl(item.thumb);
+      // psd 没有配套缩略图：绝不能把 psd 原文件当图片源（几十 MB 读不动，
+      // 慢任务占满懒加载队列 → 其他缩略图全部排队 → 占位符割裂）
+      if (/\.psd$/i.test(item.file)) return null;
+      return fileUrl(item.file);                         // 图片素材：原图即预览
+    }
+    if (item.thumb) return item.thumb;                   // mock（data URL / 生成图）
     return null;
   }
 
@@ -297,7 +313,7 @@
   // ⚠ 版本检测必要：ExtendScript 全局在 PS 运行期间一直保留，重开面板不会更新旧脚本，
   //    旧版脚本缺新函数 → 扫描静默失败（只显分类不显素材）
   // 内部重试 3 次：CEP 偶发时序问题（CEF 加载完但 ExtendScript 还没编译好 hostscript）
-  const REQUIRED_SCRIPT_VERSION = "32.2.8";   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
+  const REQUIRED_SCRIPT_VERSION = "32.2.9";   // 须与 hostscript.jsx 的 PSL_SCRIPT_VERSION 同步
   let hostScriptVersion = "";                 // 检测到的 hostscript 实际版本（设置面板展示）
 
   // 语义化版本比较：'32.1.1' > '32.1' > '32'（缺段补 0）；返回 a > b
@@ -1083,6 +1099,39 @@
     return lazyObserver;
   }
 
+  // 缺缩略图 psd 的后台补生成：逐个调 PSL_EnsureThumb（PS 一次只开一个文档），
+  // 间隔节流不打扰用户做图；生成成功后把该卡片换成真缩略图并写回本地状态。
+  // 覆盖老素材与远程同步缺图的素材；入队即标记，本次会话失败不重复重试。
+  const THUMB_GEN_GAP = 1000;      // 相邻两次生成的最小间隔（ms）
+  let _genQueue = [];
+  let _genBusy = false;
+  function thumbGenNext() {
+    if (_genBusy || !_genQueue.length) return;
+    _genBusy = true;
+    const it = _genQueue.shift();
+    evalScript("PSL_EnsureThumb('" + esc(it.file) + "')").then((r) => {
+      if (r.indexOf("OK:") === 0) {
+        it.thumb = r.slice(3);
+        saveState();
+        const img = grid.querySelector('.card[data-id="' + it.id + '"] .card-thumb');
+        if (img) { img.dataset.fb = "1"; thumbLoad(img, fileUrl(it.thumb)); }
+      }
+    }).catch(() => { /* 生成失败不阻塞主流程 */ }).then(() => {
+      _genBusy = false;
+      setTimeout(thumbGenNext, THUMB_GEN_GAP);
+    });
+  }
+  function ensureThumbs(items) {
+    if (MOCK || !hostReady) return;
+    for (const it of items) {
+      if (it._thumbQueued || it.thumb || !it.file) continue;
+      if (!/\.psd$/i.test(it.file)) continue;
+      it._thumbQueued = true;   // 入队即标记：本次会话不再重复排队（失败也不重试）
+      _genQueue.push(it);
+    }
+    thumbGenNext();
+  }
+
   // 磁盘存在性校验防抖：搜索/排序/切分类都会触发 renderGrid，
   // 没防抖时每次渲染都立刻发一轮 PSL_CheckFiles 桥接调用，旧版 PS 上明显卡顿
   let _verifyTimer = null;
@@ -1223,6 +1272,8 @@
 
     // 延后校验当前视图素材是否还在磁盘上（防抖，避免频繁渲染时重复发桥接调用）
     scheduleVerify();
+    // 缺缩略图的 psd 入后台补生成队列（回收站/欢迎页不触发；切分类/搜索时增量补齐）
+    if (!isTrash && !isWelcome) ensureThumbs(items);
   }
   let _saveBtnMode = "";
 
@@ -1284,7 +1335,10 @@
         thumbLoad(img, thumb);   // 老 CEP 也走并发队列，避免一次解码几十张大图
       }
     } else {
-      img.style.visibility = "hidden";
+      // 无缩略图（缺 _t.png 的 psd）：显示占位图标，不阻塞懒加载队列；
+      // 后台 ensureThumbs 补生成成功后会换成真图
+      img.className = "card-thumb thumb-none";
+      img.src = NO_THUMB_ICON;
     }
 
     card.querySelector(".card-menu").addEventListener("click", (e) => {
